@@ -359,6 +359,7 @@ const v2: Record<string, string> = {
   "v2.avatarGenerated": "Avatar generado",
   "v2.avatarGenerateFailed": "Operación de avatar fallida",
   "v2.avatarAISubmitted": "Generación de avatar enviada al HQ Operator (tarea {taskId})",
+  "v2.cloudTab": "Cloud",
   "v2.permissionPolicies": "Políticas de Permisos",
   "v2.permissionPoliciesDesc": "Reglas granulares de tools, paths y comandos para agentes Pi",
   "v2.createPolicy": "Nueva Política",

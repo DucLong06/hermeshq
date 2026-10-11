@@ -53,11 +53,12 @@ const ResourcesTab = lazy(() => import("../../components/settings/ResourcesTab")
 const M365Tab = lazy(() => import("../../components/settings/M365Tab"));
 const PublicChatKeysTab = lazy(() => import("../../components/settings/PublicChatKeysTab"));
 const PermissionPoliciesTab = lazy(() => import("../../components/settings/PermissionPoliciesTab").then((m) => ({ default: m.PermissionPoliciesTab })));
+const CloudTab = lazy(() => import("../../components/settings/CloudTab").then((m) => ({ default: m.CloudTab })));
 
 type SettingsTab =
   | "general" | "runtime" | "providers" | "integrations" | "factory"
   | "externalAccess" | "hermesVersions" | "secrets" | "templates"
-  | "authentication" | "email" | "resources" | "m365" | "publicChatKeys" | "permissionPolicies";
+  | "authentication" | "email" | "resources" | "m365" | "publicChatKeys" | "permissionPolicies" | "cloud";
 
 const TAB_GROUPS: Array<{ groupKey: string; tabs: Array<{ id: SettingsTab; labelKey: string }> }> = [
   {
@@ -77,6 +78,7 @@ const TAB_GROUPS: Array<{ groupKey: string; tabs: Array<{ id: SettingsTab; label
       { id: "factory", labelKey: "v2.factoryTab" },
       { id: "templates", labelKey: "v2.templatesTab" },
       { id: "permissionPolicies", labelKey: "v2.permissionPolicies" },
+      { id: "cloud", labelKey: "v2.cloudTab" },
     ],
   },
   {
@@ -262,6 +264,7 @@ export function V2SettingsPage() {
               />
             )}
             {activeTab === "permissionPolicies" && <PermissionPoliciesTab />}
+            {activeTab === "cloud" && <CloudTab />}
           </Suspense>
         </div>
       </div>

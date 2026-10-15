@@ -12,6 +12,44 @@ _EVALUATE_TIMEOUT_SECONDS = 5.0
 _LAST_OK_FILE = ".hermeshq_guard_last_ok"
 _GRACE_STATE = {"last_ok": None}
 _GUARD_USER_AGENT = "hermeshq-guard/1.0"
+_ENV_KEYS = (
+    "HERMESHQ_AGENT_ID",
+    "HERMESHQ_AGENT_TOKEN",
+    "HERMESHQ_INTERNAL_API_URL",
+    "HERMESHQ_GUARD_FAIL_MODE",
+)
+
+
+def _load_profile_env() -> None:
+    if all(os.environ.get(key) for key in _ENV_KEYS[:3]):
+        return
+    candidates = []
+    home = os.environ.get("HERMES_HOME")
+    if home:
+        candidates.append(Path(home) / ".env")
+    try:
+        candidates.append(Path(__file__).resolve().parents[2] / ".env")
+    except IndexError:
+        pass
+    for env_path in candidates:
+        try:
+            if not env_path.is_file():
+                continue
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key in _ENV_KEYS and not os.environ.get(key):
+                    os.environ[key] = value.strip().strip('"').strip("'")
+        except OSError:
+            continue
+        if all(os.environ.get(key) for key in _ENV_KEYS[:3]):
+            return
+
+
+_load_profile_env()
 
 
 def _internal_api_url() -> str:

@@ -217,16 +217,28 @@ class EnrollmentService:
         guard_files = self._guard_plugin_files()
         guard_api_url = settings.enrollment_public_api_url or settings.internal_api_base_url
         runtime_provider = normalize_runtime_provider(agent.provider)
+        device_token = create_device_token(agent.id, device.id, device.token_version)
+        llm_proxy_enabled = bool(getattr(settings, "enrollment_llm_proxy", True))
+        proxy_base = f"{guard_api_url.rstrip('/')}/api/enrollment/llm/v1"
         custom_provider = None
         model_provider = runtime_provider or ""
-        if runtime_provider == "openai-codex" and (api_key or agent.base_url):
-            model_provider = "hermeshq-openai-compatible"
-            custom_provider = {
-                "name": "HermesHQ OpenAI-compatible",
-                "base_url": (agent.base_url or "").strip(),
-                "key_env": "OPENAI_API_KEY",
-                "default_model": agent.model,
-            }
+        if runtime_provider == "openai-codex":
+            if llm_proxy_enabled:
+                model_provider = "hermeshq-openai-compatible"
+                custom_provider = {
+                    "name": "HermesHQ OpenAI-compatible",
+                    "base_url": proxy_base,
+                    "key_env": "OPENAI_API_KEY",
+                    "default_model": agent.model,
+                }
+            elif api_key or agent.base_url:
+                model_provider = "hermeshq-openai-compatible"
+                custom_provider = {
+                    "name": "HermesHQ OpenAI-compatible",
+                    "base_url": (agent.base_url or "").strip(),
+                    "key_env": "OPENAI_API_KEY",
+                    "default_model": agent.model,
+                }
         payload = {
             "version": BUNDLE_VERSION,
             "agent": {
@@ -240,9 +252,11 @@ class EnrollmentService:
                 "provider": agent.provider,
                 "model_provider": model_provider,
                 "custom_provider": custom_provider,
-                "base_url": agent.base_url,
+                "base_url": proxy_base
+                if (llm_proxy_enabled and runtime_provider == "openai-codex")
+                else agent.base_url,
                 "hermes_version": agent.hermes_version,
-                "api_key": api_key,
+                "api_key": None if llm_proxy_enabled else api_key,
             },
             "guard": {
                 "fail_mode": device.guard_fail_mode,
@@ -250,9 +264,14 @@ class EnrollmentService:
                 "plugin_files": guard_files,
                 "env": {
                     "HERMESHQ_AGENT_ID": agent.id,
-                    "HERMESHQ_AGENT_TOKEN": create_device_token(agent.id, device.id, device.token_version),
+                    "HERMESHQ_AGENT_TOKEN": device_token,
                     "HERMESHQ_INTERNAL_API_URL": guard_api_url.rstrip("/"),
                 },
+            },
+            "llm_proxy": {
+                "enabled": llm_proxy_enabled,
+                "base_url": proxy_base,
+                "api_key": device_token,
             },
             "skills": list(agent.skills or []),
         }
@@ -260,6 +279,10 @@ class EnrollmentService:
         etag_source["guard"] = {
             **payload["guard"],
             "env": {k: v for k, v in payload["guard"]["env"].items() if k != "HERMESHQ_AGENT_TOKEN"},
+        }
+        etag_source["llm_proxy"] = {
+            **payload["llm_proxy"],
+            "api_key": None,
         }
         canonical = json.dumps(etag_source, sort_keys=True).encode()
         return {"etag": hashlib.sha256(canonical).hexdigest()[:32], "bundle": payload}

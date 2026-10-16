@@ -225,3 +225,102 @@ async def revoke_device(
         raise HTTPException(status_code=403, detail="Admin access required to revoke devices")
     revoked = await service.revoke_device(device_id)
     return _device_read(revoked).model_dump()
+
+
+_LLM_PROXY_RATE_LIMIT = 240
+_LLM_RATE_BUCKET: dict[str, list[float]] = {}
+_LLM_UA = "hermeshq-llm-proxy/1.0"
+
+
+def _llm_rate_ok(device_id: str) -> bool:
+    import time as _time
+
+    now = _time.monotonic()
+    bucket = [ts for ts in _LLM_RATE_BUCKET.get(device_id, []) if now - ts < 3600]
+    if len(bucket) >= _LLM_PROXY_RATE_LIMIT:
+        _LLM_RATE_BUCKET[device_id] = bucket
+        return False
+    bucket.append(now)
+    _LLM_RATE_BUCKET[device_id] = bucket
+    return True
+
+
+async def _resolve_llm_target(db: AsyncSession, agent) -> tuple[str, str]:
+    from hermeshq.models.provider import ProviderDefinition
+    from hermeshq.services.enrollment import resolve_secret_value
+
+    api_key = None
+    settings = None
+    if agent.api_key_ref:
+        from hermeshq.config import get_settings
+        from hermeshq.services.secret_vault import build_vault_from_settings
+
+        settings = get_settings()
+        api_key = await resolve_secret_value(db, build_vault_from_settings(settings), agent.api_key_ref)
+    base_url = (agent.base_url or "").strip()
+    if not base_url and agent.provider:
+        definition = await db.get(ProviderDefinition, agent.provider)
+        if definition is not None and definition.base_url:
+            base_url = definition.base_url.strip()
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    return api_key or "", base_url.rstrip("/")
+
+
+@router.post("/llm/v1/chat/completions")
+async def llm_proxy_chat(
+    request: Request,
+    device: EnrolledDevice = Depends(_resolve_device_from_token),
+    db: AsyncSession = Depends(get_db_session),
+):
+    import httpx
+
+    from hermeshq.models.agent import Agent
+
+    if not _llm_rate_ok(device.id):
+        raise HTTPException(status_code=429, detail="LLM rate limit reached for this device")
+    agent = await db.get(Agent, device.agent_id)
+    if not agent or agent.is_archived:
+        raise HTTPException(status_code=403, detail="Agent is not available")
+    api_key, base_url = await _resolve_llm_target(db, agent)
+    body = await request.body()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": request.headers.get("accept", "application/json"),
+        "User-Agent": _LLM_UA,
+    }
+    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=60, pool=10))
+
+    async def stream():
+        try:
+            async with client.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                content=body,
+                headers=headers,
+            ) as upstream:
+                if upstream.status_code >= 400:
+                    error_body = await upstream.aread()
+                    yield _llm_error(upstream.status_code, error_body)
+                    return
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+        except httpx.HTTPError:
+            yield _llm_error(502, b'{"detail":"Upstream provider is unreachable"}')
+        finally:
+            await client.aclose()
+
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(stream(), media_type="application/json")
+
+
+def _llm_error(status_code: int, body: bytes) -> bytes:
+    import json as _json
+
+    try:
+        parsed = _json.loads(body)
+    except (ValueError, _json.JSONDecodeError):
+        parsed = {"detail": body.decode("utf-8", errors="replace")[:300]}
+    return _json.dumps({"error": {"proxy": True, "status": status_code, "detail": parsed}}).encode()

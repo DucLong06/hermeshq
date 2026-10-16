@@ -241,12 +241,18 @@ def _write_home(state: dict, bundle: dict) -> Path:
     guard_env = guard.get("env", {})
     env_lines = [f"{key}={value}" for key, value in guard_env.items()]
     env_lines.append(f"HERMESHQ_GUARD_FAIL_MODE={guard.get('fail_mode', 'fail-open')}")
-    api_key = agent.get("api_key")
-    if api_key:
-        for env_name in PROVIDER_ENV_FALLBACK.get((agent.get("provider") or "").lower(), ["OPENAI_API_KEY"]):
-            env_lines.append(f"{env_name}={api_key}")
-    if agent.get("base_url"):
-        env_lines.append(f"OPENAI_BASE_URL={agent['base_url']}")
+    llm_proxy = bundle.get("llm_proxy") or {}
+    if llm_proxy.get("enabled") and llm_proxy.get("api_key"):
+        env_lines.append(f"OPENAI_API_KEY={llm_proxy['api_key']}")
+        if llm_proxy.get("base_url"):
+            env_lines.append(f"OPENAI_BASE_URL={llm_proxy['base_url']}")
+    else:
+        api_key = agent.get("api_key")
+        if api_key:
+            for env_name in PROVIDER_ENV_FALLBACK.get((agent.get("provider") or "").lower(), ["OPENAI_API_KEY"]):
+                env_lines.append(f"{env_name}={api_key}")
+        if agent.get("base_url"):
+            env_lines.append(f"OPENAI_BASE_URL={agent['base_url']}")
     env_path = home / ".env"
     env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     os.chmod(env_path, 0o600)

@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     runtime_runner_url: str = "http://runtime-runner:8080"
     runtime_runner_token: str = ""
     runtime_egress_allowlist: str = ""
+    enrollment_llm_proxy: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",

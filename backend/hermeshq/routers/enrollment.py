@@ -85,7 +85,10 @@ def _device_read(device: EnrolledDevice) -> DeviceRead:
 async def _resolve_device_from_token(
     request: Request,
     device_token: str | None = Header(default=None, alias=DEVICE_TOKEN_HEADER),
+    authorization: str | None = Header(default=None),
 ) -> EnrolledDevice:
+    if not device_token and authorization and authorization.lower().startswith("bearer "):
+        device_token = authorization[7:].strip()
     if not device_token:
         raise HTTPException(status_code=401, detail="Missing device token")
     device = await _service(request).resolve_device_by_token(device_token)

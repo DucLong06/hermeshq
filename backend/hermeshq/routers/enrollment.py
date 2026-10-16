@@ -247,7 +247,7 @@ def _llm_rate_ok(device_id: str) -> bool:
 
 async def _resolve_llm_target(db: AsyncSession, agent) -> tuple[str, str]:
     from hermeshq.models.provider import ProviderDefinition
-    from hermeshq.services.enrollment import resolve_secret_value
+    from hermeshq.services.credentials import resolve_secret_value
 
     api_key = None
     settings = None

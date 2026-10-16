@@ -219,7 +219,10 @@ class EnrollmentService:
         runtime_provider = normalize_runtime_provider(agent.provider)
         device_token = create_device_token(agent.id, device.id, device.token_version)
         llm_proxy_enabled = bool(getattr(settings, "enrollment_llm_proxy", True))
-        proxy_base = f"{guard_api_url.rstrip('/')}/api/enrollment/llm/v1"
+        public_base = guard_api_url.rstrip("/")
+        if public_base.endswith("/api/internal"):
+            public_base = public_base[: -len("/api/internal")]
+        proxy_base = f"{public_base}/api/enrollment/llm/v1"
         custom_provider = None
         model_provider = runtime_provider or ""
         if runtime_provider == "openai-codex":

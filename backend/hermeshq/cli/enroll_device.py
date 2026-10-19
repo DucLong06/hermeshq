@@ -224,20 +224,8 @@ def cmd_activate(args: argparse.Namespace) -> None:
     cmd_sync(argparse.Namespace(force=True))
 
 
-def _write_home(state: dict, bundle: dict) -> Path:
-    agent_slug = bundle.get("agent", {}).get("slug") or state.get("agent_slug")
-    if state.get("hermes_home"):
-        home = Path(state["hermes_home"])
-    elif state.get("as_profile", True):
-        home = _profile_home(agent_slug or "hermeshq-agent")
-    else:
-        home = STATE_DIR / "agents" / state.get("agent_id", "unknown")
-    state["hermes_home"] = str(home)
-    state["agent_slug"] = agent_slug
+def _apply_bundle_to(home: Path, agent: dict, guard: dict, bundle: dict) -> None:
     home.mkdir(parents=True, exist_ok=True)
-    agent = bundle["agent"]
-    guard = bundle["guard"]
-
     guard_env = guard.get("env", {})
     env_lines = [f"{key}={value}" for key, value in guard_env.items()]
     env_lines.append(f"HERMESHQ_GUARD_FAIL_MODE={guard.get('fail_mode', 'fail-open')}")
@@ -282,7 +270,52 @@ def _write_home(state: dict, bundle: dict) -> Path:
         target = plugin_root / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+
+def _write_home(state: dict, bundle: dict) -> Path:
+    agent_slug = bundle.get("agent", {}).get("slug") or state.get("agent_slug")
+    if state.get("hermes_home"):
+        home = Path(state["hermes_home"])
+    elif state.get("as_profile", True):
+        home = _profile_home(agent_slug or "hermeshq-agent")
+    else:
+        home = STATE_DIR / "agents" / state.get("agent_id", "unknown")
+    state["hermes_home"] = str(home)
+    state["agent_slug"] = agent_slug
+    agent = bundle["agent"]
+    guard = bundle["guard"]
+    _apply_bundle_to(home, agent, guard, bundle)
     print(f"Synced bundle → {home}")
+    for mirror in state.get("mirrors") or []:
+        mirror_path = Path(mirror).expanduser()
+        if mirror_path == home:
+            continue
+        try:
+            _apply_bundle_to(mirror_path, agent, guard, bundle)
+            print(f"Synced mirror → {mirror_path}")
+        except OSError as exc:
+            print(f"Mirror sync failed ({mirror_path}): {exc}", file=sys.stderr)
+    return home
+
+
+def cmd_mirror(args: argparse.Namespace) -> None:
+    state = _load_state()
+    mirrors = list(state.get("mirrors") or [])
+    target = str(Path(args.path).expanduser().resolve())
+    if args.action == "add":
+        if target not in mirrors:
+            mirrors.append(target)
+        print(f"Mirror added: {target}")
+    elif args.action == "remove":
+        mirrors = [m for m in mirrors if m != target]
+        print(f"Mirror removed: {target}")
+    else:
+        print("Mirrors:" if mirrors else "No mirrors configured.")
+        for mirror in mirrors:
+            print(f"  {mirror}")
+        return
+    state["mirrors"] = mirrors
+    _save_state(state)
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
@@ -483,6 +516,15 @@ def main() -> int:
     sync_parser = subparsers.add_parser("sync", help="Pull the latest agent bundle")
     sync_parser.add_argument("--force", action="store_true", help="Ignore etag and re-download")
     sync_parser.set_defaults(func=cmd_sync)
+
+    mirror_parser = subparsers.add_parser("mirror", help="Manage mirror copies of the enrolled profile")
+    mirror_sub = mirror_parser.add_subparsers(dest="action", required=True)
+    mirror_add = mirror_sub.add_parser("add", help="Add a mirror path")
+    mirror_add.add_argument("path")
+    mirror_remove = mirror_sub.add_parser("remove", help="Remove a mirror path")
+    mirror_remove.add_argument("path")
+    mirror_sub.add_parser("list", help="List mirror paths")
+    mirror_parser.set_defaults(func=cmd_mirror)
 
     run_parser = subparsers.add_parser("run", help="Sync + heartbeat loop")
     run_parser.add_argument("--interval", type=int, default=300)

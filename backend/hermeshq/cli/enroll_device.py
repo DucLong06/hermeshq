@@ -301,6 +301,11 @@ def _write_home(state: dict, bundle: dict) -> Path:
 def cmd_mirror(args: argparse.Namespace) -> None:
     state = _load_state()
     mirrors = list(state.get("mirrors") or [])
+    if args.action == "list":
+        print("Mirrors:" if mirrors else "No mirrors configured.")
+        for mirror in mirrors:
+            print(f"  {mirror}")
+        return
     target = str(Path(args.path).expanduser().resolve())
     if args.action == "add":
         if target not in mirrors:
@@ -309,11 +314,6 @@ def cmd_mirror(args: argparse.Namespace) -> None:
     elif args.action == "remove":
         mirrors = [m for m in mirrors if m != target]
         print(f"Mirror removed: {target}")
-    else:
-        print("Mirrors:" if mirrors else "No mirrors configured.")
-        for mirror in mirrors:
-            print(f"  {mirror}")
-        return
     state["mirrors"] = mirrors
     _save_state(state)
 
@@ -327,12 +327,17 @@ def cmd_sync(args: argparse.Namespace) -> None:
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            if response.status == 304:
-                print("Bundle unchanged (304).")
-                _heartbeat(state, None)
-                return
             body = json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            cached = state.get("bundle")
+            if cached:
+                _write_home(state, cached)
+                print(f"Bundle unchanged (304); re-applied to home and mirrors (etag {state.get('etag')}).")
+            else:
+                print("Bundle unchanged (304).")
+            _heartbeat(state, state.get("etag"))
+            return
         if exc.code == 401:
             raise CliError("Device token rejected — device may be revoked. Re-enroll.") from exc
         raise CliError(f"Bundle fetch failed: HTTP {exc.code}") from exc
@@ -341,6 +346,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     _write_home(state, body["bundle"])
     state["etag"] = body["etag"]
+    state["bundle"] = body["bundle"]
     _save_state(state)
     _heartbeat(state, body["etag"])
     print(f"Sync complete (etag {body['etag']}).")
@@ -417,6 +423,7 @@ def cmd_install(args: argparse.Namespace) -> None:
   <key>ProgramArguments</key>
   <array>
     <string>{sys.executable}</string>
+    <string>-u</string>
     <string>{cli_path}</string>
     <string>run</string>
     <string>--interval</string>

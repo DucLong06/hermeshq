@@ -14,6 +14,7 @@ from sqlalchemy.orm import aliased
 
 logger = logging.getLogger(__name__)
 
+PROGRESS_NOTICE_SECONDS = 180
 
 HISTORY_USER_MARKER = "[Mensaje anterior, ya respondido; no lo repitas] "
 
@@ -187,7 +188,7 @@ from hermeshq.models.secret import Secret
 from hermeshq.models.task import Task
 from hermeshq.services.auto_background import create_continuation
 from hermeshq.services.hermes_runtime import HermesRuntime
-from hermeshq.services.schedule_notifications import enqueue_schedule_notification
+from hermeshq.services.schedule_notifications import enqueue_progress_notice, enqueue_schedule_notification
 from hermeshq.services.secret_vault import SecretVault
 from hermeshq.services.task_board import sync_board_with_runtime
 
@@ -758,6 +759,25 @@ class AgentSupervisor:
             if runner is not None:
                 runner.cancel()
 
+    async def _progress_notice_after(self, task_id: str, seconds: int) -> None:
+        try:
+            await asyncio.sleep(seconds)
+            async with self.session_factory() as session:
+                task = await session.get(Task, task_id)
+                if not task or task.status != "running":
+                    return
+                minutes = max(1, seconds // 60)
+                body = (
+                    f"⏳ Sigo trabajando en tu solicitud (lleva más de {minutes} min). Te respondo apenas termine; "
+                    "no hace falta reenviarla. Si prefieres detenerla, escribe «cancela»."
+                )
+                if await enqueue_progress_notice(session, task, body):
+                    await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001  # the heads-up is best-effort and must never touch the task
+            logger.exception("Could not send the progress notice for task %s", task_id)
+
     async def _run_task(self, task_id: str, claim_token: str) -> None:
         callbacks: list = []
         try:
@@ -829,6 +849,7 @@ class AgentSupervisor:
             async def stream_callback(delta: str, index: int | None = None) -> None:
                 await stream_buffer.push(delta, index)
 
+            progress_timer = asyncio.create_task(self._progress_notice_after(task_id, PROGRESS_NOTICE_SECONDS))
             try:
                 runtime = self.runtimes.get(agent.runtime_type or "hermes", self.runtimes["hermes"])
                 execution = await runtime.execute(
@@ -839,6 +860,7 @@ class AgentSupervisor:
                     session_id=session_id,
                 )
             finally:
+                progress_timer.cancel()
                 await stream_buffer.stop_flush_loop()
             async with self.session_factory() as session:
                 task = (

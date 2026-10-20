@@ -68,12 +68,27 @@ class ThinkingModeTests(unittest.TestCase):
             merged = HermesRuntime._build_request_overrides(agent, home)
         self.assertEqual(
             merged,
-            {"extra_body": {"chat_template_kwargs": {"enable_thinking": True, "x": 1}}, "service_tier": "fast"},
+            {
+                "parallel_tool_calls": False,
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": True, "x": 1}},
+                "service_tier": "fast",
+            },
         )
 
     def test_agent_without_the_attribute_is_supported(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(HermesRuntime._build_request_overrides(SimpleNamespace(), Path(tmp)), {})
+            self.assertEqual(
+                HermesRuntime._build_request_overrides(SimpleNamespace(), Path(tmp)), {"parallel_tool_calls": False}
+            )
+
+    def test_every_agent_gets_sequential_tool_calls_unless_its_file_says_otherwise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertFalse(
+                HermesRuntime._build_request_overrides(SimpleNamespace(thinking_mode="on"), home)["parallel_tool_calls"]
+            )
+            (home / "request_overrides.json").write_text('{"parallel_tool_calls": true}', encoding="utf-8")
+            self.assertTrue(HermesRuntime._build_request_overrides(SimpleNamespace(), home)["parallel_tool_calls"])
 
     def test_merge_does_not_mutate_inputs(self):
         base = {"a": {"b": 1}}

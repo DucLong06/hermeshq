@@ -39,31 +39,42 @@ def _get_http_client() -> httpx.AsyncClient:
 # Rate limiter for login endpoint
 # ---------------------------------------------------------------------------
 _LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_MAX_ATTEMPTS_PER_IP = 40
+_LOGIN_MAX_ATTEMPTS_PER_USER = 8
 _LOGIN_WINDOW_SECONDS = 300  # 5 minutes
+_LOGIN_MAX_USERNAME_CHARS = 64
 _login_attempts: dict[str, list[float]] = defaultdict(list)
 
 
-def _check_login_rate(ip: str) -> None:
-    """Raise 429 if IP has exceeded login rate limit."""
+def _user_rate_key(username: str | None) -> str:
+    return "user:" + (username or "").strip().lower()[:_LOGIN_MAX_USERNAME_CHARS]
+
+
+def _check_login_rate(key: str, max_attempts: int = _LOGIN_MAX_ATTEMPTS) -> None:
+    """Raise 429 if the key (an IP or a 'user:<name>' key) exceeded its failed-login limit."""
     now = time.time()
-    attempts = _login_attempts.get(ip, [])
+    attempts = _login_attempts.get(key, [])
     # Prune expired attempts
     recent = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
     if recent:
-        _login_attempts[ip] = recent
-    elif ip in _login_attempts:
+        _login_attempts[key] = recent
+    elif key in _login_attempts:
         # Clean up empty entries to prevent unbounded memory growth
-        del _login_attempts[ip]
-    if len(_login_attempts.get(ip, [])) >= _LOGIN_MAX_ATTEMPTS:
+        del _login_attempts[key]
+    if len(_login_attempts.get(key, [])) >= max_attempts:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please try again later.",
         )
 
 
-def _record_login_attempt(ip: str) -> None:
+def _record_login_attempt(key: str) -> None:
     """Record a failed login attempt for rate limiting."""
-    _login_attempts.setdefault(ip, []).append(time.time())
+    _login_attempts.setdefault(key, []).append(time.time())
+
+
+def _clear_login_attempts(key: str) -> None:
+    _login_attempts.pop(key, None)
 
 
 logger = logging.getLogger(__name__)

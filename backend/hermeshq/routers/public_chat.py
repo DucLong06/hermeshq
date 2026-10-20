@@ -43,6 +43,11 @@ def _friendly_task_error(event: dict) -> str:
         return "Todos los agentes están ocupados en este momento. Intenta de nuevo en unos minutos."
     if "exceeded the task timeout" in raw_error or "produced no output" in raw_error:
         return "Tu solicitud tardó demasiado y se detuvo. Intenta con una petición más acotada o con menos archivos."
+    if "invalid tool call" in raw_error or "stopped early" in raw_error:
+        return (
+            "El agente generó una llamada inválida y se detuvo. Reintenta el mensaje; "
+            "si pedías un informe grande, pídelo por partes (de a 2 capítulos)."
+        )
     return "The agent encountered an error processing your message."
 
 

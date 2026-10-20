@@ -55,10 +55,7 @@ async def record_audit(
 
 
 def extract_ip(request: Any) -> str | None:
-    """Extract client IP from a FastAPI Request object."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Return the client IP resolved by the server (proxy headers only from trusted proxies)."""
     if request.client:
         return request.client.host
     return None

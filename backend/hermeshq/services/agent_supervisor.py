@@ -266,6 +266,10 @@ class AgentSupervisor:
             and (not thread_id or str((item.metadata_json or {}).get("thread_id") or "").strip() == thread_id)
             and (cutoff is None or item.queued_at is None or item.queued_at >= cutoff)
         ]
+        for indice in range(len(prior_turns) - 1, -1, -1):
+            if (prior_turns[indice].metadata_json or {}).get("reset"):
+                prior_turns = prior_turns[indice + 1 :]
+                break
         history: list[dict] = []
         for prior in prior_turns[-6:]:
             if prior.prompt.strip():

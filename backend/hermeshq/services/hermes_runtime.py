@@ -16,6 +16,7 @@ from hermeshq.services.runtime_runner_client import RuntimeRunnerClient
 from hermeshq.services.secret_vault import SecretVault
 
 logger = logging.getLogger(__name__)
+DEFAULT_REQUEST_OVERRIDES = {"parallel_tool_calls": False}
 
 
 # ── Response attachment extension/MIME maps (shared with task_runner) ──
@@ -124,6 +125,102 @@ class HermesRuntime(RuntimeBase):
         return limit
 
     @staticmethod
+    def _previous_files_note(workspace_path: Path, max_age_hours: int = 3, limit: int = 8) -> str:
+        """Lista los archivos de turnos anteriores que siguen en el workspace, para que el agente no los vuelva a descargar ni a extraer."""
+        import time
+
+        limite = time.time() - max(1, max_age_hours) * 3600
+        candidatos: list[tuple[float, str]] = []
+        patrones = (
+            "sharepoint_downloads/*",
+            "work/*/datos.md",
+            "work/*/datos.json",
+            "work/*/spec.json",
+            "work/*/*.xlsx",
+            "work/*/*.json",
+        )
+        vistos: set[str] = set()
+        for patron in patrones:
+            for ruta in workspace_path.glob(patron):
+                try:
+                    if not ruta.is_file() or ruta.name.startswith("."):
+                        continue
+                    mtime = ruta.stat().st_mtime
+                except OSError:
+                    continue
+                relativa = str(ruta.relative_to(workspace_path))
+                if mtime >= limite and relativa not in vistos:
+                    vistos.add(relativa)
+                    candidatos.append((mtime, relativa))
+        if not candidatos:
+            return ""
+        ahora = time.time()
+        candidatos.sort(reverse=True)
+        lineas = [f"- {ruta} (hace {max(1, int((ahora - mtime) // 60))} min)" for mtime, ruta in candidatos[:limit]]
+        return (
+            "[Archivos de turnos anteriores que siguen en tu workspace. Reutilízalos: NO los vuelvas a buscar, descargar "
+            "ni extraer de nuevo; léelos directamente desde aquí]\n" + "\n".join(lineas)
+        )
+
+    @staticmethod
+    def _prompt_with_notices(prompt: str, metadata, workspace_path: Path) -> str:
+        notas = []
+        if isinstance(metadata, dict) and metadata.get("conversation") and not metadata.get("scheduled"):
+            from hermeshq.services.cron_schedule import DEFAULT_TIMEZONE, current_time_context
+
+            notas.append(current_time_context(DEFAULT_TIMEZONE))
+        nota = HermesRuntime._nota_reinicio_automatico(metadata, workspace_path)
+        if nota:
+            notas.append(nota)
+        return "\n\n".join([prompt, *notas]) if notas else prompt
+
+    @staticmethod
+    def _nota_reinicio_automatico(metadata, workspace_path: Path) -> str:
+        aviso = (metadata or {}).get("auto_reset_aviso")
+        if not isinstance(aviso, dict):
+            return ""
+        try:
+            archivos = HermesRuntime._previous_files_note(workspace_path)
+        except OSError:
+            archivos = ""
+        nota = (
+            f"[AVISO DEL SISTEMA: las últimas {aviso.get('fallos')} solicitudes de esta conversación agotaron el tiempo "
+            f"({aviso.get('minutos')} min perdidos) y el contexto se reinició automáticamente para romper el bucle. "
+            "Tu primera línea debe decirle al usuario, sin culparlo, que las últimas solicitudes se agotaron y que empiezas "
+            "con contexto limpio. NO retomes planes anteriores. Antes de actuar consulta `catalogo-de-capacidades`: si ya "
+            "existe una herramienta para lo que pide, úsala. Si no queda claro qué quiere el usuario, pregúntale en UNA frase.]"
+        )
+        return f"{nota}\n\n{archivos}" if archivos else nota
+
+    @staticmethod
+    def _prompt_with_previous_files(prompt: str, workspace_path: Path, conversation_history: list | None) -> str:
+        if not conversation_history:
+            return prompt
+        try:
+            nota = HermesRuntime._previous_files_note(workspace_path)
+        except OSError:
+            return prompt
+        return f"{prompt}\n\n{nota}" if nota else prompt
+
+    @staticmethod
+    def _recover_result_from_stream(segmentos: list[str], return_code: int | None) -> dict | None:
+        """Si el proceso terminó bien pero no entregó el resultado final, usa el último mensaje que escribió el agente."""
+        if return_code not in (0, None):
+            return None
+        texto = next((t.strip() for t in reversed(segmentos) if t.strip()), "")
+        if len(texto) < 20:
+            return None
+        return {
+            "final_response": texto,
+            "messages": [],
+            "tool_calls": [],
+            "tokens_used": max(256, len(texto.split())),
+            "iterations": 0,
+            "engine": "hermes-agent",
+            "recovered": True,
+        }
+
+    @staticmethod
     def _thinking_overrides(thinking_mode: str | None) -> dict:
         if thinking_mode not in ("on", "off"):
             return {}
@@ -152,7 +249,10 @@ class HermesRuntime(RuntimeBase):
     @staticmethod
     def _build_request_overrides(agent: Agent, hermes_home: Path, task: Task | None = None) -> dict:
         return HermesRuntime._merge_overrides(
-            HermesRuntime._thinking_overrides(HermesRuntime._effective_thinking_mode(agent, task)),
+            HermesRuntime._merge_overrides(
+                dict(DEFAULT_REQUEST_OVERRIDES),
+                HermesRuntime._thinking_overrides(HermesRuntime._effective_thinking_mode(agent, task)),
+            ),
             HermesRuntime._load_request_overrides(hermes_home),
         )
 
@@ -324,7 +424,11 @@ class HermesRuntime(RuntimeBase):
         )
         payload = {
             "task_id": str(task.id),
-            "prompt": task.prompt,
+            "prompt": self._prompt_with_notices(
+                self._prompt_with_previous_files(task.prompt, workspace_path, conversation_history),
+                task.metadata_json,
+                workspace_path,
+            ),
             "system_override": task.system_override,
             "model": effective_model,
             "provider": runtime_provider,
@@ -369,6 +473,12 @@ class HermesRuntime(RuntimeBase):
             )
 
         final_result: dict | None = None
+        segmentos: list[str] = [""]
+        traza: dict = {"lineas": 0, "eventos": {}, "no_json": 0, "ultima_no_json": "", "mayor_linea": 0}
+
+        async def _entregar(texto: str) -> None:
+            segmentos[-1] += texto
+            await stream_callback(texto)
 
         async def _consume() -> dict | None:
             result: dict | None = None
@@ -377,14 +487,23 @@ class HermesRuntime(RuntimeBase):
                 nonlocal result
                 if not text:
                     return
+                traza["lineas"] += 1
+                traza["mayor_linea"] = max(traza["mayor_linea"], len(text))
                 try:
                     event = json.loads(text)
                 except json.JSONDecodeError:
-                    await stream_callback(text)
+                    traza["no_json"] += 1
+                    traza["ultima_no_json"] = f"{text[:80]} … {text[-80:]} ({len(text)} chars)"
+                    await _entregar(text)
                     return
 
+                tipo_evento = str(event.get("event"))
+                traza["eventos"][tipo_evento] = traza["eventos"].get(tipo_evento, 0) + 1
                 if event.get("event") == "delta" and event.get("data"):
-                    await stream_callback(str(event["data"]))
+                    await _entregar(str(event["data"]))
+                elif event.get("event") == "segment_break":
+                    if segmentos[-1].strip():
+                        segmentos.append("")
                 elif event.get("event") == "result":
                     result = event
                 elif event.get("event") == "error":
@@ -440,12 +559,16 @@ class HermesRuntime(RuntimeBase):
                 raise RuntimeExecutionError(stderr_output or "Hermes runtime process exited with an error")
         if not final_result:
             logger.warning(
-                "Hermes runtime ended without a result payload (task=%s, returncode=%s, stderr=%s)",
+                "Hermes runtime ended without a result payload (task=%s, returncode=%s, trace=%s, stderr=%s)",
                 task.id,
                 return_code,
+                json.dumps(traza, ensure_ascii=False),
                 stderr_output[-1500:] or "<empty>",
             )
-            raise RuntimeExecutionError("Hermes runtime returned no result payload")
+            final_result = self._recover_result_from_stream(segmentos, return_code)
+            if not final_result:
+                raise RuntimeExecutionError("Hermes runtime returned no result payload")
+            logger.warning("Recovered the final answer of task %s from the streamed text", task.id)
 
         raw_response = str(final_result.get("final_response") or "").strip()
 

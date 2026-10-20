@@ -185,6 +185,7 @@ from hermeshq.models.messaging_channel import MessagingChannel
 from hermeshq.models.node import Node
 from hermeshq.models.secret import Secret
 from hermeshq.models.task import Task
+from hermeshq.services.auto_background import create_continuation
 from hermeshq.services.hermes_runtime import HermesRuntime
 from hermeshq.services.schedule_notifications import enqueue_schedule_notification
 from hermeshq.services.secret_vault import SecretVault
@@ -371,6 +372,13 @@ class AgentSupervisor:
                     task.error_message = f"Task lease expired after {task.attempt_count} execution attempts."
                     event_type = "task.failed"
                     message = "Task exceeded recovery attempts"
+                    if (task.metadata_json or {}).get("background_job"):
+                        await enqueue_schedule_notification(
+                            session,
+                            task,
+                            success=False,
+                            summary="el servidor se reinició mientras lo trabajaba; vuelve a pedirlo",
+                        )
                 else:
                     task.status = "queued"
                     task.started_at = None
@@ -972,6 +980,7 @@ class AgentSupervisor:
                 )
         except Exception as exc:  # noqa: BLE001  # task cancellation catch-all
             failed_event: dict | None = None
+            auto_job_id = None
             async with self.session_factory() as session:
                 task = (
                     await session.execute(
@@ -995,6 +1004,11 @@ class AgentSupervisor:
                     task.claimed_at = None
                     task.lease_expires_at = None
                     task.cancel_requested_at = None
+                    try:
+                        auto_job = await create_continuation(session, task, str(exc))
+                        auto_job_id = auto_job.id if auto_job else None
+                    except Exception:  # noqa: BLE001  # the continuation is best-effort
+                        logger.exception("Could not start the automatic background continuation")
                 if task and agent:
                     agent.last_activity = utcnow()
                     await self._log(
@@ -1028,6 +1042,8 @@ class AgentSupervisor:
                     await enqueue_schedule_notification(session, task, success=False, summary=str(exc))
                 await session.commit()
                 await self._drain_callbacks(callbacks)
+                if auto_job_id:
+                    await self.submit_task(auto_job_id)
                 if task:
                     failed_event = {
                         "type": "task.failed",
@@ -1036,6 +1052,8 @@ class AgentSupervisor:
                         "error": str(exc),
                         "error_type": type(exc).__name__,
                     }
+                    if auto_job_id:
+                        failed_event["auto_background"] = True
                     if task.created_by_user_id:
                         failed_event["created_by_user_id"] = task.created_by_user_id
             if failed_event is not None:

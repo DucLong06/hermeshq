@@ -352,6 +352,109 @@ async def create_own_schedule(
     }
 
 
+class InternalBackgroundJob(BaseModel):
+    task_id: str | None = None
+    title: str
+    instructions: str
+
+
+MAX_BACKGROUND_TITLE_CHARS = 120
+MAX_BACKGROUND_INSTRUCTIONS_CHARS = 8000
+
+
+@router.post("/background-jobs", status_code=status.HTTP_201_CREATED)
+async def start_background_job(
+    payload: InternalBackgroundJob,
+    request: Request,
+    agent: Agent = Depends(_get_internal_agent),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    origin = await db.get(Task, (payload.task_id or "").strip()) if payload.task_id else None
+    if not origin or origin.agent_id != agent.id or origin.status != "running":
+        raise HTTPException(status_code=403, detail="Background jobs can only be started from a live conversation")
+    origin_metadata = origin.metadata_json or {}
+    if origin_metadata.get("scheduled") or origin_metadata.get("background_job"):
+        raise HTTPException(
+            status_code=403, detail="Background jobs cannot be started from a scheduled or background run"
+        )
+    if origin_metadata.get("source") != "public_chat":
+        raise HTTPException(status_code=403, detail="Background jobs are only available from the chat")
+    user_id = str(origin_metadata.get("thread_user_id") or "").strip()
+    user = await db.get(User, user_id) if user_id else None
+    if not user or not user.is_active or not await can_access_agent(db, user, agent.id):
+        raise HTTPException(status_code=403, detail="Background jobs need a conversation with an identified user")
+    title = " ".join(payload.title.split())
+    instructions = payload.instructions.strip()
+    if not title or not instructions:
+        raise HTTPException(status_code=400, detail="'title' and 'instructions' are required")
+    if len(title) > MAX_BACKGROUND_TITLE_CHARS:
+        raise HTTPException(status_code=400, detail=f"'title' must be at most {MAX_BACKGROUND_TITLE_CHARS} characters")
+    if len(instructions) > MAX_BACKGROUND_INSTRUCTIONS_CHARS:
+        raise HTTPException(
+            status_code=400, detail=f"'instructions' must be at most {MAX_BACKGROUND_INSTRUCTIONS_CHARS} characters"
+        )
+    await db.execute(select(Agent.id).where(Agent.id == agent.id).with_for_update())
+    active = await db.execute(select(Task).where(Task.agent_id == agent.id, Task.status.in_(("queued", "running"))))
+    for item in active.scalars().all():
+        item_metadata = item.metadata_json or {}
+        if item_metadata.get("background_job") and item_metadata.get("thread_user_id") == user_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya hay un trabajo en segundo plano en curso para este usuario: {item_metadata.get('background_title')}",
+            )
+    from hermeshq.config import get_settings
+    from hermeshq.services.cron_schedule import current_time_context
+    from hermeshq.services.task_board import next_board_order, runtime_status_to_board_column
+
+    timeout_seconds = int(get_settings().background_job_timeout_seconds)
+    prompt = (
+        f"{instructions}\n\n"
+        "[Este es un TRABAJO EN SEGUNDO PLANO pedido por el usuario en el chat: no ve la conversación ni puedes "
+        "preguntarle nada. Entrega al final el resultado COMPLETO y listo para leer (conclusión primero, cifras exactas "
+        "de la fuente, sin inventar). Si generas un archivo, guárdalo en tu espacio de trabajo y da la ruta. "
+        "Si ninguna herramienta cubre lo pedido, aquí SÍ puedes construirlo a medida (HTML, scripts) y explicarlo al final. "
+        f"Tienes hasta {timeout_seconds // 60} minutos.]\n\n{current_time_context(DEFAULT_TIMEZONE)}"
+    )
+    job = Task(
+        agent_id=agent.id,
+        created_by_user_id=None,
+        title=f"Trabajo en segundo plano: {title}"[:255],
+        prompt=prompt,
+        metadata_json={
+            "background_job": True,
+            "background_title": title,
+            "source": "background_job",
+            "thread_user_id": user_id,
+            "origin_task_id": origin.id,
+        },
+    )
+    job.board_column = runtime_status_to_board_column(job.status)
+    job.board_order = next_board_order()
+    job.board_manual = False
+    db.add(job)
+    db.add(
+        ActivityLog(
+            agent_id=agent.id,
+            task_id=origin.id,
+            event_type="background_job.started",
+            message=title,
+            details={"requested_for_user_id": user_id},
+        )
+    )
+    await db.commit()
+    await db.refresh(job)
+    await request.app.state.supervisor.submit_task(job.id)
+    return {
+        "success": True,
+        "job_id": job.id,
+        "message": (
+            "Trabajo iniciado en segundo plano. Responde AHORA al usuario, en una o dos frases, que lo estás "
+            "trabajando aparte y que le avisarás por este chat con el resultado; no esperes ni repitas el trabajo aquí."
+        ),
+        "max_minutes": timeout_seconds // 60,
+    }
+
+
 class InternalScheduleApprove(BaseModel):
     task_id: str | None = None
 

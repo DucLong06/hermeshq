@@ -41,6 +41,11 @@ def _friendly_task_error(event: dict) -> str:
     raw_error = str(event.get("error") or "")
     if error_type == "QueueTimeout":
         return "Todos los agentes están ocupados en este momento. Intenta de nuevo en unos minutos."
+    if event.get("auto_background"):
+        return (
+            "Tu solicitud es larga y no alcanzó a terminar aquí. La sigo en segundo plano y te aviso por este chat "
+            "apenas esté lista; no hace falta reenviarla. Si prefieres detenerla, escribe «cancela»."
+        )
     if "exceeded the task timeout" in raw_error or "produced no output" in raw_error:
         return "Tu solicitud tardó demasiado y se detuvo. Intenta con una petición más acotada o con menos archivos."
     if "invalid tool call" in raw_error or "stopped early" in raw_error:

@@ -23,6 +23,7 @@ from hermeshq.models.public_chat import (
 from hermeshq.models.task import Task
 from hermeshq.models.user import User
 from hermeshq.services.cancel_intent import (
+    is_ack_request,
     is_cancel_request,
     is_reset_request,
     is_status_request,
@@ -40,6 +41,7 @@ RACHA_FALLOS_MINIMA = 3
 RACHA_FALLOS_VENTANA = 4
 RACHA_HORAS = 4
 RACHA_ERRORES = ("exceeded the task timeout", "produced no output for", "no result payload", "stopped early")
+RESPUESTA_RAPIDA_MINUTOS = 60
 EXITO_REAL_SEGUNDOS = 90
 EXITO_REAL_ITERACIONES = 4
 MAX_ASSISTANT_MESSAGE_LENGTH = 32_768
@@ -283,6 +285,8 @@ class PublicChatService:
     @staticmethod
     def _task_belongs_to_chat(task: Task, session_id: str, thread_user_id: str) -> bool:
         metadata = task.metadata_json or {}
+        if metadata.get("background_job"):
+            return thread_user_id != PUBLIC_CHAT_USER_ID and metadata.get("thread_user_id") == thread_user_id
         if metadata.get("source") != "public_chat":
             return False
         if metadata.get("public_session_id") == session_id:
@@ -360,10 +364,21 @@ class PublicChatService:
     def _status_reply(tasks: list) -> str:
         ahora = utcnow()
         corriendo = [t for t in tasks if t.status == "running"]
-        principal = (corriendo or tasks)[0]
+        orden = sorted(
+            corriendo or tasks, key=lambda t: bool((getattr(t, "metadata_json", None) or {}).get("background_job"))
+        )
+        principal = orden[0]
         inicio = principal.started_at or principal.queued_at
         segundos = max(0, int((ahora - inicio).total_seconds())) if inicio else 0
         tiempo = f"{segundos // 60} min {segundos % 60:02d} s" if segundos >= 60 else f"{segundos} s"
+        metadata = getattr(principal, "metadata_json", None) or {}
+        if metadata.get("background_job"):
+            titulo = metadata.get("background_title") or "tu análisis"
+            return (
+                f"⏳ Tu trabajo en segundo plano «{titulo}» sigue en curso (lleva {tiempo}). "
+                "Te aviso por aquí apenas termine; mientras tanto puedes seguir pidiéndome otras cosas. "
+                "Si prefieres detenerlo, escribe «cancela»."
+            )
         pedido = " ".join((principal.prompt or "").split())
         pedido = pedido[:90] + "…" if len(pedido) > 90 else pedido
         if corriendo:
@@ -375,6 +390,25 @@ class PublicChatService:
             estado
             + extra
             + " Te respondo apenas termine; no hace falta reenviarla. Si prefieres detenerla, escribe «cancela»."
+        )
+
+    async def _failed_attempt_reply(self, db, session, session_id: str, thread_user_id: str) -> str | None:
+        result = await db.execute(
+            select(Task).where(Task.agent_id == session.agent_id).order_by(Task.queued_at.desc()).limit(25)
+        )
+        propias = [t for t in result.scalars().all() if self._task_belongs_to_chat(t, session_id, thread_user_id)]
+        propias = [t for t in propias if (t.metadata_json or {}).get("conversation")]
+        if not propias:
+            return None
+        ultima = propias[0]
+        reciente = ultima.completed_at and utcnow() - ultima.completed_at <= timedelta(minutes=RESPUESTA_RAPIDA_MINUTOS)
+        if ultima.status != "failed" or not reciente or "exceeded the task timeout" not in (ultima.error_message or ""):
+            return None
+        pedido = " ".join((ultima.prompt or "").split())
+        pedido = pedido[:90] + "…" if len(pedido) > 90 else pedido
+        return (
+            f"⚠️ Mi intento anterior se agotó antes de terminar tu solicitud «{pedido}». "
+            "Escribe «hazlo en segundo plano» y la retomo aparte, con hasta 60 minutos, y te aviso por aquí con el resultado."
         )
 
     async def handle_cancel_request(
@@ -389,7 +423,8 @@ class PublicChatService:
         """If the message only asks to stop (or to reset), cancel this chat's running tasks and return the reply text."""
         reset = is_reset_request(content)
         status = not reset and not is_cancel_request(content) and is_status_request(content)
-        if not reset and not status and not is_cancel_request(content):
+        ack = not reset and not status and not is_cancel_request(content) and is_ack_request(content)
+        if not reset and not status and not ack and not is_cancel_request(content):
             return None
         if not self.rate_limiter.check(session_id):
             raise ValueError("Rate limit exceeded")
@@ -403,9 +438,17 @@ class PublicChatService:
             select(Task).where(Task.agent_id == session.agent_id, Task.status.in_(("running", "queued")))
         )
         mine = [task for task in result.scalars().all() if self._task_belongs_to_chat(task, session_id, thread_user_id)]
-        if status:
+        if ack and not any((task.metadata_json or {}).get("background_job") for task in mine):
+            return None
+        if status or ack:
             if not mine:
-                return None
+                reply = await self._failed_attempt_reply(db, session, session_id, thread_user_id)
+                if not reply:
+                    return None
+                db.add(PublicChatMessage(session_id=session_id, role="user", content=content))
+                db.add(PublicChatMessage(session_id=session_id, role="assistant", content=reply))
+                await db.commit()
+                return reply
             reply = self._status_reply(mine)
             db.add(PublicChatMessage(session_id=session_id, role="user", content=content))
             db.add(PublicChatMessage(session_id=session_id, role="assistant", content=reply))

@@ -63,7 +63,7 @@ def _api_request(method: str, path: str, payload: dict | None = None) -> str:
 
 def hq_schedule_request_tool(args, **_kwargs):
     metadata = _task_metadata()
-    if metadata.get("scheduled"):
+    if metadata.get("scheduled") or metadata.get("background_job"):
         return json.dumps({"success": False, "error": "Schedules cannot be created from inside a scheduled run"})
     user_id = str(metadata.get("thread_user_id") or metadata.get("created_by_user_id") or "").strip()
     if not user_id:
@@ -102,6 +102,32 @@ def hq_schedule_approve_tool(args, **_kwargs):
     return _api_request("POST", f"/agents/self/schedules/{schedule_id}/approve", {"task_id": task_id})
 
 
+def hq_trabajo_largo_tool(args, **_kwargs):
+    metadata = _task_metadata()
+    if metadata.get("scheduled") or metadata.get("background_job"):
+        return json.dumps(
+            {
+                "success": False,
+                "error": "No se puede iniciar un trabajo en segundo plano desde otro trabajo programado o en segundo plano",
+            }
+        )
+    titulo = str(args.get("titulo") or "").strip()
+    instrucciones = str(args.get("instrucciones") or "").strip()
+    task_id = str(_task_payload().get("task_id") or "").strip()
+    if not titulo or not instrucciones or not task_id:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "'titulo' e 'instrucciones' son obligatorios y debe haber una conversación en curso",
+            }
+        )
+    return _api_request(
+        "POST",
+        "/agents/self/background-jobs",
+        {"task_id": task_id, "title": titulo, "instructions": instrucciones},
+    )
+
+
 def hq_schedule_list_tool(args, **_kwargs):
     return _api_request("GET", "/agents/self/schedules")
 
@@ -121,7 +147,38 @@ def _check_requirements():
     )
 
 
+DESC_TRABAJO_LARGO = (
+    "Lanza un análisis LARGO en segundo plano y devuelve el control al instante. Úsalo SOLO cuando el pedido claramente "
+    "tomará más de 10 minutos (cruzar varias hojas, revisar cientos de casos, comparar muchos archivos) y no se puede "
+    "armar con las herramientas rápidas. El trabajo corre aparte (hasta 60 min), con los mismos accesos del usuario, y su "
+    "resultado le llega por este chat cuando termine. 'instrucciones' debe bastarse sola: el trabajo NO ve la "
+    "conversación, así que incluye pedido exacto, rutas de archivos ya descargados, reglas pactadas y "
+    "cómo entregar. Después de llamarla, responde en 1-2 frases que lo trabajas aparte y avisarás. Un solo trabajo a la vez; "
+    "no la uses para pedidos normales. También sirve para construir A MEDIDA lo que ninguna herramienta cubre (un informe HTML de un tipo nuevo, un script): en segundo plano sí se puede escribir HTML o código largo."
+)
+
+
 def register(ctx):
+    ctx.register_tool(
+        name="hq_trabajo_largo",
+        toolset="hermeshq_schedule",
+        schema={
+            "name": "hq_trabajo_largo",
+            "description": DESC_TRABAJO_LARGO,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "titulo": {"type": "string", "description": "Nombre corto del trabajo (se muestra al usuario)."},
+                    "instrucciones": {"type": "string", "description": "Instrucciones completas y autosuficientes."},
+                },
+                "required": ["titulo", "instrucciones"],
+            },
+        },
+        handler=hq_trabajo_largo_tool,
+        check_fn=_check_requirements,
+        description="Start a long analysis in the background and notify the user when it finishes",
+        emoji="⏳",
+    )
     ctx.register_tool(
         name="hq_schedule_request",
         toolset="hermeshq_schedule",

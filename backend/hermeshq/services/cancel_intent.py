@@ -252,3 +252,36 @@ def is_status_request(text: str | None) -> bool:
         return False
     padded = f" {' '.join(tokens)} "
     return any(f" {_normalize(phrase).strip()} " in padded for phrase in STATUS_PHRASES)
+
+
+ACK_WORDS = frozenset(
+    {
+        "ok",
+        "okey",
+        "okay",
+        "dale",
+        "listo",
+        "ya",
+        "vale",
+        "perfecto",
+        "gracias",
+        "arranca",
+        "arraca",
+        "empieza",
+        "avanza",
+        "sigue",
+        "continua",
+        "continuar",
+        "seguimos",
+        "hazlo",
+        "si",
+    }
+)
+ACK_MAX_WORDS = 2
+
+
+def is_ack_request(text: str | None) -> bool:
+    if not text:
+        return False
+    tokens = _normalize(text).strip().split()
+    return 0 < len(tokens) <= ACK_MAX_WORDS and all(token in ACK_WORDS for token in tokens)

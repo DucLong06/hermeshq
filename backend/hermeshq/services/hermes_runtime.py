@@ -118,6 +118,8 @@ class HermesRuntime(RuntimeBase):
         from hermeshq.config import get_settings
 
         limit = HermesRuntime._task_timeout_seconds()
+        if (task.metadata_json or {}).get("background_job"):
+            return max(60, min(3600, int(get_settings().background_job_timeout_seconds)))
         if str((task.metadata_json or {}).get("source") or "") == "public_chat":
             public_limit = int(get_settings().public_chat_task_timeout_seconds)
             if public_limit > 0:
@@ -188,7 +190,8 @@ class HermesRuntime(RuntimeBase):
             f"({aviso.get('minutos')} min perdidos) y el contexto se reinició automáticamente para romper el bucle. "
             "Tu primera línea debe decirle al usuario, sin culparlo, que las últimas solicitudes se agotaron y que empiezas "
             "con contexto limpio. NO retomes planes anteriores. Antes de actuar consulta `catalogo-de-capacidades`: si ya "
-            "existe una herramienta para lo que pide, úsala. Si no queda claro qué quiere el usuario, pregúntale en UNA frase.]"
+            "existe una herramienta para lo que pide, úsala. Si es una construcción grande que ninguna herramienta cubre, "
+            "ofrece hacerla en segundo plano con `hq_trabajo_largo`. Si no queda claro qué quiere el usuario, pregúntale en UNA frase.]"
         )
         return f"{nota}\n\n{archivos}" if archivos else nota
 

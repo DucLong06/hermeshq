@@ -7,3 +7,4 @@ provides_tools:
   - hq_schedule_approve
   - hq_schedule_list
   - hq_schedule_delete
+  - hq_trabajo_largo

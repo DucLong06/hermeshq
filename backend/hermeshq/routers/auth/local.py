@@ -39,6 +39,7 @@ from hermeshq.schemas.auth import (
     UserProfileUpdate,
     UserRead,
 )
+from hermeshq.services.audit import record_audit
 from hermeshq.services.avatar import (
     delete_avatar_files as _delete_avatar_files_shared,
 )
@@ -49,14 +50,18 @@ from hermeshq.services.avatar import (
 from hermeshq.services.email_service import EmailServiceError, get_email_service
 
 from .helpers import (
+    _LOGIN_MAX_ATTEMPTS_PER_IP,
+    _LOGIN_MAX_ATTEMPTS_PER_USER,
     _build_avatar_path,
     _check_login_rate,
     _clear_auth_cookie,
+    _clear_login_attempts,
     _get_auth_mode,
     _record_login_attempt,
     _serialize_user,
     _set_auth_cookie,
     _user_avatar_base,
+    _user_rate_key,
     logger,
 )
 from .mfa import _create_mfa_token, _is_mfa_globally_enabled, _mask_email, _send_mfa_code
@@ -124,12 +129,31 @@ async def login(
     payload: LoginRequest, response: Response, request: Request, db: AsyncSession = Depends(get_db_session)
 ):
     client_ip = request.client.host if request.client else "unknown"
-    _check_login_rate(client_ip)
+    user_key = _user_rate_key(payload.username)
+    _check_login_rate(client_ip, _LOGIN_MAX_ATTEMPTS_PER_IP)
+    if payload.username:
+        _check_login_rate(user_key, _LOGIN_MAX_ATTEMPTS_PER_USER)
     result = await db.execute(select(User).where(User.username == payload.username))
     user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
         _record_login_attempt(client_ip)
+        if user is not None:
+            _record_login_attempt(user_key)
+        attempted = (payload.username or "")[:64]
+        logger.warning("Failed login for %r from %s", attempted, client_ip)
+        await record_audit(
+            db,
+            action="auth.login_failed",
+            target_type="user",
+            target_name=attempted,
+            actor_username=attempted,
+            ip_address=client_ip,
+            details={"user_exists": user is not None},
+        )
+        await db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    _clear_login_attempts(user_key)
 
     # Check if MFA is required
     mfa_enabled = await _is_mfa_globally_enabled(db)
@@ -218,8 +242,7 @@ async def forgot_password(
     expires_at = datetime.now(UTC) + timedelta(minutes=expires_minutes)
 
     # Get client IP
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    ip = forwarded.split(",")[0].strip() if forwarded else request.client.host if request.client else None
+    ip = request.client.host if request.client else None
 
     reset_token = PasswordResetToken(
         user_id=user.id,

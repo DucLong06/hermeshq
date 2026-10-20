@@ -300,7 +300,11 @@ async def create_own_schedule(
         ):
             raise HTTPException(
                 status_code=409,
-                detail=f"A similar schedule already exists (id {item.id}, status {item.approval_status})",
+                detail=(
+                    f"A similar schedule already exists (id {item.id}, name '{item.name}', cron '{item.cron_expression}', "
+                    f"status {item.approval_status}). Do not create it again: tell the user it already exists; if they "
+                    "want it changed, ask them to delete it in HermesHQ or request a different name and time."
+                ),
             )
 
     origin_task = await db.get(Task, payload.task_id.strip()) if payload.task_id else None
@@ -343,8 +347,11 @@ async def create_own_schedule(
         "first_run_if_approved_now": _local_time(first_run),
         "message": (
             "Schedule created but NOT active. Show the user the name, the schedule in Chile time and the exact "
-            f"prompt, then tell them to reply exactly 'aprobar {item.approval_code}' in this same chat. After "
-            "that reply, call hq_schedule_approve. The user can also approve it in HermesHQ > Scheduled Tasks. "
+            f"prompt, then tell them to reply exactly 'aprobar {item.approval_code}' in this same chat. Copy the code "
+            "character by character from approval_code; never retype it from memory. The system activates the "
+            "schedule by itself when the user replies with that exact message, so you normally do not need to call "
+            "hq_schedule_approve. Never delete and recreate the schedule just because the user asks about the code: "
+            "read it again with hq_schedule_list. The user can also approve it in HermesHQ > Scheduled Tasks. "
             "Results of scheduled runs always appear in HermesHQ web (Tasks and the agent conversation panel). "
             "They are also queued for delivery to this chat when the chat bridge supports notifications, so do "
             "not promise it will arrive here."
@@ -522,7 +529,13 @@ async def delete_own_schedule(
     if not item or item.agent_id != agent.id:
         raise HTTPException(status_code=404, detail="Schedule not found")
     if item.created_by_agent_id != agent.id:
-        raise HTTPException(status_code=403, detail="Only schedules created by this agent can be deleted by it")
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only schedules created by this agent can be deleted by it. This one was created by the user or the "
+                "administrator: tell the user they can delete or edit it themselves in HermesHQ."
+            ),
+        )
     await db.delete(item)
     db.add(
         ActivityLog(

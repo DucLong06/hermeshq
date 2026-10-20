@@ -30,6 +30,7 @@ from hermeshq.services.cancel_intent import (
     split_reset_prefix,
 )
 from hermeshq.services.channel_user_resolver import resolve_channel_user
+from hermeshq.services.schedule_approval import approval_code_from, approve_by_code
 from hermeshq.services.task_board import next_board_order, runtime_status_to_board_column
 
 logger = logging.getLogger(__name__)
@@ -421,10 +422,11 @@ class PublicChatService:
         client_ip: str = "",
     ) -> str | None:
         """If the message only asks to stop (or to reset), cancel this chat's running tasks and return the reply text."""
+        approval_code = approval_code_from(content)
         reset = is_reset_request(content)
         status = not reset and not is_cancel_request(content) and is_status_request(content)
         ack = not reset and not status and not is_cancel_request(content) and is_ack_request(content)
-        if not reset and not status and not ack and not is_cancel_request(content):
+        if not reset and not status and not ack and not approval_code and not is_cancel_request(content):
             return None
         if not self.rate_limiter.check(session_id):
             raise ValueError("Rate limit exceeded")
@@ -438,6 +440,16 @@ class PublicChatService:
             select(Task).where(Task.agent_id == session.agent_id, Task.status.in_(("running", "queued")))
         )
         mine = [task for task in result.scalars().all() if self._task_belongs_to_chat(task, session_id, thread_user_id)]
+        if approval_code:
+            if thread_user_id == PUBLIC_CHAT_USER_ID:
+                return None
+            reply = await approve_by_code(db, session.agent_id, thread_user_id, approval_code, "public_chat")
+            if reply is None:
+                return None
+            db.add(PublicChatMessage(session_id=session_id, role="user", content=content))
+            db.add(PublicChatMessage(session_id=session_id, role="assistant", content=reply))
+            await db.commit()
+            return reply
         if ack and not any((task.metadata_json or {}).get("background_job") for task in mine):
             return None
         if status or ack:

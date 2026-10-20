@@ -327,6 +327,8 @@ class InternalScheduleEndpointTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as ctx:
             await self._create(db, _payload())
         self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("informe DIARIO", ctx.exception.detail)
+        self.assertIn("Do not create it again", ctx.exception.detail)
 
     async def test_delete_refuses_schedule_not_created_by_agent(self):
         db = MagicMock()
@@ -336,6 +338,7 @@ class InternalScheduleEndpointTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as ctx:
             await internal_agents.delete_own_schedule("s1", self.agent, db)
         self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIn("delete or edit it themselves", ctx.exception.detail)
 
     async def test_delete_refuses_other_agents_schedule(self):
         db = MagicMock()

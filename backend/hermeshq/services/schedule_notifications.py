@@ -24,6 +24,54 @@ def _clip(text: str, limit: int) -> str:
     return text[: limit - 40].rstrip() + "\n\n…(resultado recortado, ver HermesHQ)"
 
 
+async def _delivery_keys(session: AsyncSession, user, agent_id: str) -> list:
+    key_filters = [PublicChatApiKey.bound_user_id == user.id]
+    if user.teams_id:
+        key_filters.append(and_(PublicChatApiKey.trust_sender_id.is_(True), PublicChatApiKey.bound_user_id.is_(None)))
+    result = await session.execute(
+        select(PublicChatApiKey).where(
+            PublicChatApiKey.agent_id == agent_id,
+            PublicChatApiKey.is_active.is_(True),
+            or_(*key_filters),
+        )
+    )
+    now = datetime.now(UTC)
+    return [
+        key
+        for key in result.scalars().all()
+        if key.last_notification_poll_at and now - key.last_notification_poll_at <= BRIDGE_LIVENESS_WINDOW
+    ]
+
+
+async def enqueue_progress_notice(session: AsyncSession, task, body: str) -> int:
+    metadata = task.metadata_json or {}
+    user_id = str(metadata.get("thread_user_id") or "").strip()
+    if not user_id or metadata.get("background_job") or metadata.get("scheduled"):
+        return 0
+    try:
+        user = await session.get(User, user_id)
+        if not user or not user.is_active:
+            return 0
+        keys = await _delivery_keys(session, user, task.agent_id)
+        for key in keys:
+            session.add(
+                PublicChatNotification(
+                    api_key_id=key.id,
+                    agent_id=task.agent_id,
+                    recipient_user_id=user.id,
+                    sender_id=user.teams_id if key.trust_sender_id else None,
+                    schedule_id=None,
+                    task_id=task.id,
+                    title="Sigo trabajando en tu solicitud",
+                    body=body,
+                )
+            )
+        return len(keys)
+    except Exception:  # noqa: BLE001  # a notice problem must never touch the task itself
+        logger.exception("Failed to enqueue progress notice for task %s", getattr(task, "id", None))
+        return 0
+
+
 async def enqueue_schedule_notification(session: AsyncSession, task, *, success: bool, summary: str | None) -> int:
     metadata = task.metadata_json or {}
     background = bool(metadata.get("background_job"))
@@ -50,24 +98,7 @@ async def enqueue_schedule_notification(session: AsyncSession, task, *, success:
         user = await session.get(User, owner_user_id)
         if not user or not user.is_active:
             return 0
-        key_filters = [PublicChatApiKey.bound_user_id == user.id]
-        if user.teams_id:
-            key_filters.append(
-                and_(PublicChatApiKey.trust_sender_id.is_(True), PublicChatApiKey.bound_user_id.is_(None))
-            )
-        result = await session.execute(
-            select(PublicChatApiKey).where(
-                PublicChatApiKey.agent_id == agent_id,
-                PublicChatApiKey.is_active.is_(True),
-                or_(*key_filters),
-            )
-        )
-        now = datetime.now(UTC)
-        keys = [
-            key
-            for key in result.scalars().all()
-            if key.last_notification_poll_at and now - key.last_notification_poll_at <= BRIDGE_LIVENESS_WINDOW
-        ]
+        keys = await _delivery_keys(session, user, agent_id)
         if not keys:
             return 0
         if background:

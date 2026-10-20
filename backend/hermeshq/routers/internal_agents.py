@@ -525,7 +525,13 @@ async def delete_own_schedule(
     if not item or item.agent_id != agent.id:
         raise HTTPException(status_code=404, detail="Schedule not found")
     if item.created_by_agent_id != agent.id:
-        raise HTTPException(status_code=403, detail="Only schedules created by this agent can be deleted by it")
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only schedules created by this agent can be deleted by it. This one was created by the user or the "
+                "administrator: tell the user they can delete or edit it themselves in HermesHQ."
+            ),
+        )
     await db.delete(item)
     db.add(
         ActivityLog(
@@ -646,84 +652,3 @@ class InternalScheduleApprove(BaseModel):
     task_id: str | None = None
 
 
-@router.post("/schedules/{schedule_id}/approve")
-async def approve_own_schedule(
-    schedule_id: str,
-    payload: InternalScheduleApprove,
-    agent: Agent = Depends(_get_internal_agent),
-    db: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
-    task = await db.get(Task, (payload.task_id or "").strip()) if payload.task_id else None
-    if not task or task.agent_id != agent.id or task.status != "running":
-        raise HTTPException(status_code=403, detail="Approval must happen inside a live conversation with the user")
-    task_metadata = task.metadata_json or {}
-    if task_metadata.get("scheduled"):
-        raise HTTPException(status_code=403, detail="Schedules cannot be approved from a scheduled run")
-    user_id = str(task_metadata.get("thread_user_id") or "").strip()
-    item = await db.get(ScheduledTask, schedule_id)
-    if not item or item.agent_id != agent.id or item.created_by_agent_id != agent.id:
-        raise HTTPException(status_code=404, detail="Schedule not found")
-    if item.approval_status != "pending":
-        raise HTTPException(status_code=409, detail="Schedule is not pending approval")
-    if not user_id or item.owner_user_id != user_id:
-        raise HTTPException(status_code=403, detail="Only the user who requested this schedule can approve it")
-    created_at = item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=UTC)
-    if datetime.now(UTC) - created_at > APPROVAL_CODE_TTL:
-        raise HTTPException(status_code=410, detail="The approval code expired; request the schedule again")
-    if not message_contains_code(task.prompt, item.approval_code):
-        raise HTTPException(
-            status_code=403,
-            detail="The user's latest message does not contain the approval code. Ask them to reply 'aprobar CODE'",
-        )
-    item.approval_status = "approved"
-    item.enabled = True
-    item.approval_code = None
-    item.next_run = compute_next_run(item.cron_expression, item.timezone)
-    db.add(
-        ActivityLog(
-            agent_id=agent.id,
-            task_id=task.id,
-            event_type="schedule.approved",
-            message=item.name,
-            details={"schedule_id": item.id, "approved_by": user_id, "channel": task_metadata.get("source")},
-        )
-    )
-    await db.commit()
-    return {
-        "success": True,
-        "schedule_id": item.id,
-        "approval_status": "approved",
-        "enabled": True,
-        "next_run_local": _local_time(item.next_run),
-        "timezone": item.timezone,
-    }
-
-
-@router.delete("/schedules/{schedule_id}")
-async def delete_own_schedule(
-    schedule_id: str,
-    agent: Agent = Depends(_get_internal_agent),
-    db: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
-    item = await db.get(ScheduledTask, schedule_id)
-    if not item or item.agent_id != agent.id:
-        raise HTTPException(status_code=404, detail="Schedule not found")
-    if item.created_by_agent_id != agent.id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Only schedules created by this agent can be deleted by it. This one was created by the user or the "
-                "administrator: tell the user they can delete or edit it themselves in HermesHQ."
-            ),
-        )
-    await db.delete(item)
-    db.add(
-        ActivityLog(
-            agent_id=agent.id,
-            event_type="schedule.deleted_by_agent",
-            message=item.name,
-            details={"schedule_id": schedule_id},
-        )
-    )
-    await db.commit()
-    return {"success": True, "deleted": schedule_id}

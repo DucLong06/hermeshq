@@ -102,31 +102,6 @@ def hq_schedule_approve_tool(args, **_kwargs):
     return _api_request("POST", f"/agents/self/schedules/{schedule_id}/approve", {"task_id": task_id})
 
 
-def hq_solicitar_capacidad_tool(args, **_kwargs):
-    titulo = str(args.get("titulo") or "").strip()
-    que_necesita = str(args.get("que_necesita") or "").strip()
-    task_id = str(_task_payload().get("task_id") or "").strip()
-    if not titulo or not que_necesita or not task_id:
-        return json.dumps(
-            {
-                "success": False,
-                "error": "'titulo' y 'que_necesita' son obligatorios y debe haber una conversación en curso",
-            }
-        )
-    archivos = args.get("archivos") if isinstance(args.get("archivos"), list) else []
-    return _api_request(
-        "POST",
-        "/agents/self/capability-requests",
-        {
-            "task_id": task_id,
-            "title": titulo,
-            "description": que_necesita,
-            "example": str(args.get("ejemplo") or "").strip() or None,
-            "attempts": str(args.get("intentos") or "").strip() or None,
-            "files": [str(a) for a in archivos],
-        },
-
-
 def hq_trabajo_largo_tool(args, **_kwargs):
     metadata = _task_metadata()
     if metadata.get("scheduled") or metadata.get("background_job"):
@@ -172,15 +147,6 @@ def _check_requirements():
     )
 
 
-DESC_SOLICITAR = (
-    "Registra una SOLICITUD DE CAPACIDAD para el administrador cuando el usuario necesita algo que NINGUNA herramienta o "
-    "skill actual cubre (un tipo nuevo de informe, una integración, un formato de entrega). Úsala en vez de intentar "
-    "fabricarlo a mano con scripts, HTML largo o una skill nueva: eso es lento y falla. Describe lo que el usuario "
-    "quiere con sus palabras, un ejemplo concreto, los archivos de muestra (rutas en el espacio de trabajo) y qué se "
-    "intentó. Después dile al usuario que quedó anotada y ofrece la alternativa más cercana con lo que ya existe. "
-    "No la uses para fallos pasajeros ni para pedidos que sí cubre una herramienta."
-
-
 DESC_TRABAJO_LARGO = (
     "Lanza un análisis LARGO en segundo plano y devuelve el control al instante. Úsalo SOLO cuando el pedido claramente "
     "tomará más de 10 minutos (cruzar varias hojas, revisar cientos de casos, comparar muchos archivos) y no se puede "
@@ -189,6 +155,42 @@ DESC_TRABAJO_LARGO = (
     "conversación, así que incluye pedido exacto, rutas de archivos ya descargados, reglas pactadas y "
     "cómo entregar. Después de llamarla, responde en 1-2 frases que lo trabajas aparte y avisarás. Un solo trabajo a la vez; "
     "no la uses para pedidos normales. También sirve para construir A MEDIDA lo que ninguna herramienta cubre (un informe HTML de un tipo nuevo, un script): en segundo plano sí se puede escribir HTML o código largo."
+)
+
+
+def hq_solicitar_capacidad_tool(args, **_kwargs):
+    titulo = str(args.get("titulo") or "").strip()
+    que_necesita = str(args.get("que_necesita") or "").strip()
+    task_id = str(_task_payload().get("task_id") or "").strip()
+    if not titulo or not que_necesita or not task_id:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "'titulo' y 'que_necesita' son obligatorios y debe haber una conversación en curso",
+            }
+        )
+    archivos = args.get("archivos") if isinstance(args.get("archivos"), list) else []
+    return _api_request(
+        "POST",
+        "/agents/self/capability-requests",
+        {
+            "task_id": task_id,
+            "title": titulo,
+            "description": que_necesita,
+            "example": str(args.get("ejemplo") or "").strip() or None,
+            "attempts": str(args.get("intentos") or "").strip() or None,
+            "files": [str(a) for a in archivos],
+        },
+    )
+
+
+DESC_SOLICITAR = (
+    "Registra una SOLICITUD DE CAPACIDAD para el administrador cuando el usuario necesita algo que NINGUNA herramienta o "
+    "skill actual cubre (un tipo nuevo de informe, una integración, un formato de entrega). Úsala en vez de intentar "
+    "fabricarlo a mano con scripts, HTML largo o una skill nueva: eso es lento y falla. Describe lo que el usuario "
+    "quiere con sus palabras, un ejemplo concreto, los archivos de muestra (rutas en el espacio de trabajo) y qué se "
+    "intentó. Después dile al usuario que quedó anotada y ofrece la alternativa más cercana con lo que ya existe. "
+    "No la uses para fallos pasajeros ni para pedidos que sí cubre una herramienta."
 )
 
 
@@ -219,8 +221,8 @@ def register(ctx):
         check_fn=_check_requirements,
         description="Register a capability request for the administrator",
         emoji="📝",
-
-
+    )
+    ctx.register_tool(
         name="hq_trabajo_largo",
         toolset="hermeshq_schedule",
         schema={

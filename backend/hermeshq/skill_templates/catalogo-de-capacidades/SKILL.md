@@ -38,6 +38,8 @@ description: "Mapa en lenguaje simple de lo que sabes hacer y con qué herramien
 | El enlace de un archivo que generaste | `sharepoint_share_file` (lo sube a OneDrive y devuelve el enlace; por defecto solo para la organización) |
 | Generar un PDF, Word, Excel o PowerPoint | `hq_pdf_generate`, `hq_docx_generate`, `hq_xlsx_generate`, `hq_pptx_generate` |
 | Presentación corporativa con la plantilla | La skill de presentaciones que tengas instalada. No armes `python-pptx` a mano |
+| Presentación con la plantilla .pptx propia del usuario (sus colores, logo y diseños) | `hq_pptx_from_template`: primero solo con `template` (lista diseños y formas), luego `slides`: por `layout` o duplicando una lámina de la plantilla (`base`, `replace`, `boxes`). Sin `python-pptx` ni `execute_code` ni `vision_analyze` lámina por lámina |
+| Traer VARIOS archivos de una carpeta de SharePoint/OneDrive | `sharepoint_download_folder` en UNA llamada (con `extensions` y `recursive`); no busques y descargues archivo por archivo |
 | Analizar una imagen | `vision_analyze`, una imagen por llamada |
 | Crear una imagen | La skill `generador-imagenes` |
 

@@ -611,7 +611,13 @@ class HermesRuntime(RuntimeBase):
         # result carries a `path` to a file they just created, attach it
         # directly from the tool result — delivery then doesn't depend on
         # the model repeating the path correctly. Added 2026-09-15.
-        _AUTO_ATTACH_TOOLS = {"hq_pdf_generate", "hq_docx_generate", "hq_pptx_generate", "hq_xlsx_generate"}
+        _AUTO_ATTACH_TOOLS = {
+            "hq_pdf_generate",
+            "hq_docx_generate",
+            "hq_pptx_generate",
+            "hq_pptx_from_template",
+            "hq_xlsx_generate",
+        }
         task_messages = final_result.get("messages") or []
         _auto_attach_call_ids = {
             tool_call.get("id")

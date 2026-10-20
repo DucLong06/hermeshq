@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -912,6 +913,177 @@ def _download_file_tool(args: dict, **_kwargs) -> str:
     return json.dumps(_local_file_result(info), ensure_ascii=False)
 
 
+_FOLDER_DEFAULT_FILES = 40
+
+
+_FOLDER_HARD_FILES = 100
+
+
+_FOLDER_DEFAULT_MB = 150
+
+
+_FOLDER_HARD_MB = 300
+
+
+_FOLDER_MAX_DEPTH = 3
+
+
+_FOLDER_WORKERS = 4
+
+
+def _clean_extensions(raw) -> set[str]:
+    values = raw if isinstance(raw, list) else ([raw] if raw else [])
+    return {"." + str(v).strip().lower().lstrip(".") for v in values if str(v).strip()}
+
+
+def _collect_folder_files(
+    base: str, folder: str, token: str, recursive: bool, depth: int, relative: str, found: list, errors: list
+) -> None:
+    items, error = _fetch_children(base, folder, token)
+    if items is None:
+        errors.append(f"{relative or '/'}: {str(error)[:80]}")
+        return
+    for item in items:
+        name = str(item.get("name") or "")
+        if "folder" in item:
+            if recursive and depth < _FOLDER_MAX_DEPTH and name:
+                child_relative = f"{relative}/{name}" if relative else name
+                parent_drive = (item.get("parentReference") or {}).get("driveId")
+                if folder == "" and base.startswith("/drives/") and item.get("id") and parent_drive:
+                    child_base, child_folder = f"/drives/{parent_drive}/items/{item['id']}", ""
+                else:
+                    child_base, child_folder = base, f"{folder}/{name}" if folder else name
+                _collect_folder_files(
+                    child_base, child_folder, token, recursive, depth + 1, child_relative, found, errors
+                )
+        else:
+            found.append({"item": item, "relative": relative})
+
+
+def _download_folder_tool(args: dict, **_kwargs) -> str:
+    user_id = _task_user_id()
+    if not user_id:
+        return json.dumps({"success": False, "error": "No se pudo determinar el usuario de esta tarea."})
+    token, user_site_url, err = _get_m365_token(user_id)
+    if not token:
+        return _auth_error(err)
+
+    site_url = str(args.get("site_url") or user_site_url or "").strip().rstrip("/")
+    folder_path = str(args.get("folder_path") or "").strip().strip("/")
+    item_id = str(args.get("item_id") or "").strip()
+    drive_id = str(args.get("drive_id") or "").strip()
+    extensions = _clean_extensions(args.get("extensions"))
+    recursive = bool(args.get("recursive"))
+    try:
+        max_files = max(1, min(_FOLDER_HARD_FILES, int(args.get("max_files") or _FOLDER_DEFAULT_FILES)))
+        max_bytes = max(1, min(_FOLDER_HARD_MB, int(args.get("max_mb") or _FOLDER_DEFAULT_MB))) * 1024 * 1024
+    except (TypeError, ValueError):
+        max_files, max_bytes = _FOLDER_DEFAULT_FILES, _FOLDER_DEFAULT_MB * 1024 * 1024
+
+    if item_id:
+        label = item_id
+        item_base = f"/drives/{drive_id}/items/{item_id}" if drive_id else f"/me/drive/items/{item_id}"
+        candidates = [(item_base, "", None)]
+    elif folder_path:
+        label = folder_path
+        if not site_url:
+            folder_path, folder_error = _normalize_drive_folder(folder_path)
+            if folder_error:
+                return json.dumps({"success": False, "error": folder_error}, ensure_ascii=False)
+        candidates = _site_bases(site_url, folder_path, token) if site_url else [("/me/drive/root", folder_path, None)]
+    else:
+        return json.dumps({"success": False, "error": "Indica folder_path (o item_id de la carpeta)."})
+
+    found: list = []
+    errors: list = []
+    last_error = "No se pudo leer la carpeta."
+    for base, folder, _name in candidates:
+        found, errors = [], []
+        probe, probe_error = _fetch_children(base, folder, token)
+        if probe is None:
+            last_error = probe_error or last_error
+            continue
+        _collect_folder_files(base, folder, token, recursive, 1, "", found, errors)
+        break
+    else:
+        return json.dumps({"success": False, "error": _with_hint(last_error)}, ensure_ascii=False)
+
+    selected: list = []
+    skipped: list = []
+    total = 0
+    for entry in found:
+        item = entry["item"]
+        name = str(item.get("name") or "archivo")
+        size = int(item.get("size") or 0)
+        ext = os.path.splitext(name.lower())[1]
+        if extensions and ext not in extensions:
+            continue
+        if size > _MAX_DOWNLOAD_BYTES:
+            skipped.append({"name": name, "motivo": f"pesa {size / (1024 * 1024):.1f} MB (máximo 10 MB por archivo)"})
+        elif len(selected) >= max_files:
+            skipped.append({"name": name, "motivo": f"se alcanzó el máximo de {max_files} archivos"})
+        elif total + size > max_bytes:
+            skipped.append(
+                {"name": name, "motivo": f"se alcanzó el máximo de {max_bytes // (1024 * 1024)} MB en total"}
+            )
+        else:
+            total += size
+            selected.append(entry)
+
+    slug = re.sub(r"[^\w.\- ]", "_", os.path.basename(str(label).rstrip("/"))).strip(" .") or "carpeta"
+    destination = Path(os.getcwd()) / _DOWNLOAD_DIR / slug
+    destination.mkdir(parents=True, exist_ok=True)
+
+    def _fetch_one(entry: dict) -> dict:
+        item = entry["item"]
+        name = str(item.get("name") or "archivo")
+        url = item.get("@microsoft.graph.downloadUrl")
+        if url:
+            data, derr = _download_bytes(url)
+        else:
+            drive = (item.get("parentReference") or {}).get("driveId") or drive_id
+            path = (
+                f"/drives/{drive}/items/{item.get('id')}/content"
+                if drive
+                else f"/me/drive/items/{item.get('id')}/content"
+            )
+            data, derr = _download_bytes(f"{GRAPH_BASE}{path}", token)
+        if data is None:
+            return {"name": name, "error": derr}
+        relative = entry["relative"]
+        safe = re.sub(r"[^\w.\- ]", "_", name).strip(" .") or "archivo"
+        prefix = re.sub(r"[^\w.\- ]", "_", relative.replace("/", "__")) + "__" if relative else ""
+        target = destination / f"{prefix}{safe}"
+        target.write_bytes(data)
+        return {
+            "name": name,
+            "size": len(data),
+            "local_path": f"{_DOWNLOAD_DIR}/{slug}/{target.name}",
+            "subcarpeta": relative or None,
+        }
+
+    downloaded: list = []
+    with ThreadPoolExecutor(max_workers=_FOLDER_WORKERS) as pool:
+        for result in pool.map(_fetch_one, selected):
+            if "error" in result:
+                skipped.append({"name": result["name"], "motivo": result["error"]})
+            else:
+                downloaded.append(result)
+
+    output = {
+        "success": True,
+        "carpeta": label,
+        "descargados": len(downloaded),
+        "archivos": downloaded,
+        "omitidos": skipped,
+        "bytes_totales": sum(f["size"] for f in downloaded),
+        "hint": "Archivos en el workspace. Lee los de texto con read_file y analiza las imágenes con vision_analyze, de a una.",
+    }
+    if errors:
+        output["subcarpetas_sin_leer"] = errors[:5]
+    return json.dumps(output, ensure_ascii=False)
+
+
 def _read_file_tool(args: dict, **_kwargs) -> str:
     try:
         max_chars = int(args.get("max_chars") or _DEFAULT_MAX_CHARS)
@@ -1174,4 +1346,45 @@ def register(ctx):
         handler=_download_file_tool,
         description="Descargar archivo de SharePoint/OneDrive al workspace",
         emoji="⬇️",
+    )
+    ctx.register_tool(
+        name="sharepoint_download_folder",
+        toolset=TOOLSET,
+        schema={
+            "name": "sharepoint_download_folder",
+            "description": (
+                "Descarga TODOS los archivos de una carpeta de OneDrive o SharePoint al workspace en UNA llamada "
+                "(en paralelo) y devuelve la lista con su local_path. Úsala cuando necesites varios archivos de una "
+                "carpeta (una biblioteca de referencia, un lote de imágenes o documentos): NO llames a "
+                "sharepoint_search y sharepoint_download_file archivo por archivo. Filtra por extensiones y, con "
+                "recursive=true, entra en subcarpetas (hasta 3 niveles). Máximo 100 archivos y 300 MB por llamada; "
+                "cada archivo hasta 10 MB. Los que no caben salen en 'omitidos' con su motivo."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "folder_path": {
+                        "type": "string",
+                        "description": "Ruta de la carpeta (ej: 'Escritorio/Proyectos/IA/Referencias'). Alternativa a item_id.",
+                    },
+                    "site_url": {"type": "string", "description": "URL del sitio SharePoint (opcional)"},
+                    "item_id": {
+                        "type": "string",
+                        "description": "ID de la carpeta (de sharepoint_search). Alternativa a folder_path.",
+                    },
+                    "drive_id": {"type": "string", "description": "ID de la unidad (opcional, junto con item_id)"},
+                    "extensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Solo estas extensiones, ej. ['pptx','png']. Sin indicar, baja todo.",
+                    },
+                    "recursive": {"type": "boolean", "description": "true: incluye subcarpetas (hasta 3 niveles)."},
+                    "max_files": {"type": "integer", "description": "Máximo de archivos (default 40, tope 100)."},
+                    "max_mb": {"type": "integer", "description": "Máximo de MB en total (default 150, tope 300)."},
+                },
+            },
+        },
+        handler=_download_folder_tool,
+        description="Descargar una carpeta completa de SharePoint/OneDrive al workspace",
+        emoji="📥",
     )

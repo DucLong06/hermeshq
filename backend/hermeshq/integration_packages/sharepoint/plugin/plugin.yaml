@@ -8,6 +8,7 @@ provides_tools:
   - sharepoint_get_file
   - sharepoint_read_file
   - sharepoint_download_file
+  - sharepoint_download_folder
   - sharepoint_search
   - sharepoint_share_file
   - sharepoint_upload_file

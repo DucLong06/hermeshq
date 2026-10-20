@@ -650,5 +650,3 @@ async def start_background_job(
 
 class InternalScheduleApprove(BaseModel):
     task_id: str | None = None
-
-

@@ -177,7 +177,7 @@ class SearchEmailsTests(unittest.TestCase):
     def test_double_quotes_in_query_cannot_break_the_search_clause(self):
         _, graph = self._search({"query": 'foo" bar'})
         path = graph.call_args.args[1]
-        self.assertIn("$search=%22foo%20%20bar%22", path)
+        self.assertIn("$search=%22foo%20bar%22", path)
 
     def test_query_with_only_quotes_is_rejected(self):
         result, graph = self._search({"query": '""'})
@@ -222,6 +222,24 @@ class SearchTests(unittest.TestCase):
         self.assertTrue(out["success"])
         self.assertIn("mailFolders/FOLDERID/messages", path)
         self.assertEqual(out["search"], 'cuentas from:"Servantis" received>=2026-10-07 hasattachments:true')
+
+    def test_filters_written_inside_query_are_moved_to_proper_fields(self):
+        out, _ = self._run({"query": 'subject:"Ticket 14.436, 15.691" from:"persona@example.com" informe'})
+        self.assertEqual(out["search"], 'informe from:"persona@example.com" subject:"Ticket 14.436, 15.691"')
+        out, _ = self._run({"query": "subject: reunión", "from": "Ana"})
+        self.assertEqual(out["search"], 'from:"Ana" subject:"reunión"')
+        out, _ = self._run({"query": 'to:"otra@example.com" factura subject:'})
+        self.assertEqual(out["search"], 'factura to:"otra@example.com"')
+
+    def test_a_syntax_error_from_graph_carries_a_hint(self):
+        with (
+            patch.object(self.plugin, "_task_user_id", return_value="u1"),
+            patch.object(self.plugin, "_get_m365_token", return_value=("tok", None)),
+            patch.object(self.plugin, "_graph", return_value={"error": "Error 400: Syntax error: character"}),
+        ):
+            out = json.loads(self.plugin._search_emails_tool({"query": "x"}))
+        self.assertFalse(out["success"])
+        self.assertIn("parámetros from, subject", out["error"])
 
     def test_results_come_newest_first_and_empty_search_is_rejected(self):
         old = {"id": "1", "receivedDateTime": "2026-10-01T10:00:00Z", "bodyPreview": ""}

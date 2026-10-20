@@ -611,7 +611,21 @@ def _directory_search(token: str, name: str, tokens: list[str], found: dict) -> 
     return f"No se pudo consultar el directorio: {ultimo_error}" if ultimo_error else None
 
 
+_MAX_PEOPLE_PER_CALL = 5
+
+
 def _find_person_tool(args: dict, **_kwargs) -> str:
+    names = args.get("names")
+    if isinstance(names, list) and names:
+        searches = []
+        for person in [str(n) for n in names if str(n or "").strip()][:_MAX_PEOPLE_PER_CALL]:
+            outcome = json.loads(_find_person_tool({"name": person, "max_results": args.get("max_results")}))
+            searches.append({"buscado": person, "resultado": outcome})
+        if not searches:
+            return json.dumps({"success": False, "error": "Se requiere names (lista de nombres) o name."})
+        return json.dumps(
+            {"success": any(x["resultado"].get("success") for x in searches), "busquedas": searches}, ensure_ascii=False
+        )
     user_id = _task_user_id()
     if not user_id:
         return json.dumps({"success": False, "error": "No se pudo determinar el usuario de esta tarea."})
@@ -1347,17 +1361,38 @@ def _kql_date(value, label) -> tuple[str | None, str | None]:
     return (parsed[:10] if parsed else None), None
 
 
+_KQL_EMBEDDED_FIELD = re.compile(r'\b(from|subject|to|cc)\s*:\s*(?:"([^"]*)"|(\S+))', re.IGNORECASE)
+
+
+def _split_embedded_fields(query: str) -> tuple[str, dict[str, str]]:
+    fields: dict[str, str] = {}
+
+    def take(match):
+        name = match.group(1).lower()
+        value = _kql_value(match.group(2) if match.group(2) is not None else match.group(3))
+        if value and name not in fields:
+            fields[name] = value
+        return " "
+
+    rest = _KQL_EMBEDDED_FIELD.sub(take, query)
+    rest = re.sub(r"\b(from|subject|to|cc)\s*:", " ", rest, flags=re.IGNORECASE)
+    return " ".join(_kql_value(rest).split()), fields
+
+
 def _build_search_kql(args: dict) -> tuple[str | None, str | None]:
     parts = []
-    query = _kql_value(args.get("query"))
+    query, embedded = _split_embedded_fields(str(args.get("query") or ""))
     if query:
         parts.append(query)
-    sender = _kql_value(args.get("from"))
+    sender = _kql_value(args.get("from")) or embedded.get("from", "")
     if sender:
         parts.append(f'from:"{sender}"')
-    subject = _kql_value(args.get("subject"))
+    subject = _kql_value(args.get("subject")) or embedded.get("subject", "")
     if subject:
         parts.append(f'subject:"{subject}"')
+    for name in ("to", "cc"):
+        if embedded.get(name):
+            parts.append(f'{name}:"{embedded[name]}"')
     since, error = _kql_date(args.get("since"), "since")
     if error:
         return None, error
@@ -1397,7 +1432,10 @@ def _search_emails_tool(args: dict, **_kwargs) -> str:
     path = f"{base}?$search=%22{urllib.parse.quote(kql, safe='')}%22&$top={count}&$select={fields}"
     result = _graph("GET", path, token)
     if "error" in result:
-        return json.dumps({"success": False, "error": result["error"]})
+        error = str(result["error"])
+        if "Syntax error" in error:
+            error += " Usa los parámetros from, subject y since en vez de escribir filtros dentro de query."
+        return json.dumps({"success": False, "error": error})
     messages = sorted(result.get("value", []), key=lambda m: m.get("receivedDateTime") or "", reverse=True)
     _cap_previews(messages, preview_chars)
     _remember_ids(messages)
@@ -1708,9 +1746,14 @@ def register(ctx):
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Nombre o apellido a buscar (ej. 'Ana Torres')"},
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Varias personas en UNA llamada (hasta 5), en vez de llamar la herramienta una por una.",
+                    },
                     "max_results": {"type": "integer", "description": "Máximo de candidatos (default 8, máx 20)"},
                 },
-                "required": ["name"],
+                "required": [],
             },
         },
         handler=_find_person_tool,

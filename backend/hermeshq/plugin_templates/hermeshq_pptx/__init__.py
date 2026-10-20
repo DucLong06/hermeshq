@@ -145,7 +145,114 @@ def _handle_generate_pptx(args, **_kwargs):
     )
 
 
+def _load_template_module():
+    import importlib.util
+
+    ruta = Path(__file__).with_name("plantilla.py")
+    spec = importlib.util.spec_from_file_location("hq_pptx_plantilla", ruta)
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+def _handle_from_template(args, **_kwargs):
+    template = str(args.get("template") or "").strip()
+    if not template:
+        return json.dumps(
+            {"success": False, "error": "Indica 'template': la ruta de la plantilla .pptx."}, ensure_ascii=False
+        )
+    try:
+        modulo = _load_template_module()
+        plantilla = _resolve_local_path(template)
+        if args.get("inspect") or not args.get("slides"):
+            return json.dumps(
+                {
+                    "success": True,
+                    "plantilla": plantilla.name,
+                    **modulo.inspeccionar(plantilla),
+                    "siguiente": "Elige un diseño por nombre o índice para cada lámina y llama de nuevo con slides.",
+                },
+                ensure_ascii=False,
+            )
+        filename = str(args.get("filename") or "").strip() or _safe_filename(plantilla.stem + "-presentacion", "pptx")
+        if not filename.lower().endswith(".pptx"):
+            filename += ".pptx"
+        work_dir = Path(os.environ.get("HERMES_SESSION_CWD", os.getcwd()))
+        destino = work_dir / "output" / filename
+        resultado = modulo.construir(
+            plantilla, args.get("slides"), destino, bool(args.get("keep_template_slides")), work_dir
+        )
+    except ValueError as exc:
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001  # un fallo de python-pptx no debe tumbar la tarea
+        return json.dumps(
+            {"success": False, "error": f"No se pudo generar la presentación: {str(exc)[:200]}"}, ensure_ascii=False
+        )
+    return json.dumps(
+        {
+            "success": True,
+            "filename": filename,
+            "path": str(destino),
+            "size_bytes": destino.stat().st_size,
+            "slide_count": resultado["laminas"],
+            "disenos_usados": resultado["disenos_usados"],
+            "avisos": resultado["avisos"],
+        },
+        ensure_ascii=False,
+    )
+
+
+DESC_FROM_TEMPLATE = (
+    "Genera una presentación PowerPoint usando los DISEÑOS de una plantilla .pptx propia del usuario (colores, "
+    "tipografías, logos y márgenes ya definidos), en una sola llamada y sin escribir código. Primero llámala con "
+    "solo 'template' (o inspect=true) para ver los diseños y sus marcadores; luego con 'slides': cada lámina elige "
+    "un 'layout' (nombre o índice) y trae title, subtitle, bullets (texto o {text, level}), text, image_path, "
+    "table {headers, rows}, notes y, si hace falta, fields {marcador: texto}. Las láminas de ejemplo de la plantilla "
+    "se descartan (keep_template_slides=true las conserva). Los marcadores vacíos se eliminan para que no quede "
+    "'Haga clic para agregar texto'. Si la plantilla trae láminas ya diseñadas (portadas, agendas, bloques con "
+    "gráficos corporativos) que hay que duplicar en vez de armar desde un diseño, la inspección lista las formas de "
+    "cada lámina (nombre, texto actual, posición, tamaño) y la lámina se pide con 'base' (número de lámina de la "
+    "plantilla) y 'replace' {nombre de la forma o texto actual: texto nuevo}, más 'boxes' [{x, y, w, h en pulgadas, "
+    "text|bullets, size, bold, color, font}] para cuerpos de texto nuevos; los logos, ondas e imágenes de la lámina "
+    "base se conservan. Revisa 'avisos' en la respuesta. NO armes presentaciones con python-pptx y "
+    "execute_code ni las revises lámina por lámina con vision_analyze salvo que el usuario lo pida."
+)
+
+
 def register(ctx):
+    ctx.register_tool(
+        name="hq_pptx_from_template",
+        toolset="hermeshq_pptx",
+        schema={
+            "name": "hq_pptx_from_template",
+            "description": DESC_FROM_TEMPLATE,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "template": {"type": "string", "description": "Ruta de la plantilla .pptx en el workspace."},
+                    "inspect": {"type": "boolean", "description": "true: solo muestra diseños y marcadores."},
+                    "slides": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "Láminas en orden: [{layout, title, subtitle, bullets, text, image_path, table, notes, fields}] "
+                            "o, para duplicar una lámina de la plantilla: [{base, replace, boxes, notes}]."
+                        ),
+                    },
+                    "filename": {"type": "string", "description": "Nombre del archivo de salida."},
+                    "keep_template_slides": {
+                        "type": "boolean",
+                        "description": "true: conserva las láminas que ya trae la plantilla y agrega las nuevas al final.",
+                    },
+                },
+                "required": ["template"],
+            },
+        },
+        handler=_handle_from_template,
+        check_fn=_check_requirements,
+        description="Generar una presentación con los diseños de una plantilla .pptx propia",
+        emoji="🎨",
+    )
     spec = {
         "name": "hq_pptx_generate",
         "description": (

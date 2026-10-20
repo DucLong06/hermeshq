@@ -90,6 +90,27 @@ _MEDIA_EXT_MIME_MAP = {
 }
 
 
+PLATFORM_RULES = (
+    "# PLATFORM RULES (apply to every agent)\n"
+    "- Keep reasoning brief: at most 5 lines before acting. Do not draft reports, documents or code inside your "
+    "reasoning; write them directly in the tool call. If two options are close, pick the simpler one and continue.\n"
+    "- Codes, identifiers, paths and recipients: copy them exactly from the tool result; never retype them from "
+    "memory.\n"
+    "- Before writing a script, check whether a tool or skill already does the job. Do not use execute_code to read "
+    "files, list folders or search text.\n"
+    "- Fewer steps: when a tool accepts a list of items, make ONE call with the whole list instead of repeating the "
+    "call. In execute_code, inspect, process and verify in a single script.\n"
+    "- If the request will take more than about 10 minutes (large reports, many files), offer to run it in the "
+    "background when a background-job tool is available, and tell the user."
+)
+
+
+def _workspace_isolation_enabled() -> bool:
+    from hermeshq.config import get_settings
+
+    return bool(get_settings().workspace_isolation)
+
+
 class HermesRuntime(RuntimeBase):
     def __init__(
         self,
@@ -127,6 +148,9 @@ class HermesRuntime(RuntimeBase):
         return limit
 
     @staticmethod
+    def _with_platform_rules(prompt: str) -> str:
+        return (prompt or "").rstrip() + "\n\n" + PLATFORM_RULES
+
     def _previous_files_note(workspace_path: Path, max_age_hours: int = 3, limit: int = 8) -> str:
         """Lista los archivos de turnos anteriores que siguen en el workspace, para que el agente no los vuelva a descargar ni a extraer."""
         import time
@@ -225,9 +249,9 @@ class HermesRuntime(RuntimeBase):
 
     @staticmethod
     def _thinking_overrides(thinking_mode: str | None) -> dict:
-        if thinking_mode not in ("on", "off"):
+        if thinking_mode not in ("on", "off", "adaptive"):
             return {}
-        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": thinking_mode == "on"}}}
+        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": thinking_mode != "off"}}}
 
     @staticmethod
     def _merge_overrides(base: dict, extra: dict) -> dict:
@@ -409,6 +433,8 @@ class HermesRuntime(RuntimeBase):
             "for you."
         )
 
+        runtime_system_prompt = self._with_platform_rules(runtime_system_prompt)
+
         # ── Channel routing: suppress external channels for mobile_app tasks ──
         _task_meta = task.metadata_json or {}
         _reply_to = str(_task_meta.get("reply_to") or _task_meta.get("source") or "").strip().lower()
@@ -442,6 +468,7 @@ class HermesRuntime(RuntimeBase):
             "max_iterations": agent.max_iterations,
             "system_prompt": runtime_system_prompt,
             "cwd": execution_workspace,
+            "workspace_guard": _workspace_isolation_enabled(),
             "hermes_home": f"{execution_workspace}/.hermes",
             "conversation_history": conversation_history or [],
             "session_id": session_id,
@@ -452,6 +479,8 @@ class HermesRuntime(RuntimeBase):
         request_overrides = self._build_request_overrides(agent, host_hermes_home, task)
         if request_overrides:
             payload["request_overrides"] = request_overrides
+        if self._effective_thinking_mode(agent, task) == "adaptive":
+            payload["thinking_adaptive"] = True
 
         if fallback_override:
             for key, value in fallback_override.items():
@@ -707,7 +736,13 @@ class HermesRuntime(RuntimeBase):
         # result carries a `path` to a file they just created, attach it
         # directly from the tool result — delivery then doesn't depend on
         # the model repeating the path correctly. Added 2026-09-15.
-        _AUTO_ATTACH_TOOLS = {"hq_pdf_generate", "hq_docx_generate", "hq_pptx_generate", "hq_xlsx_generate"}
+        _AUTO_ATTACH_TOOLS = {
+            "hq_pdf_generate",
+            "hq_docx_generate",
+            "hq_pptx_generate",
+            "hq_pptx_from_template",
+            "hq_xlsx_generate",
+        }
         task_messages = final_result.get("messages") or []
         _auto_attach_call_ids = {
             tool_call.get("id")

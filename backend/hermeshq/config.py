@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     runtime_runner_token: str = ""
     runtime_egress_allowlist: str = ""
     task_idle_timeout_seconds: int = 600
+    workspace_isolation: bool = True
+    agent_memory_char_limit: int = 3000
+    user_memory_char_limit: int = 1800
     background_job_timeout_seconds: int = 3600
     scheduled_tasks_thinking: str = "off"
     conversation_history_max_age_hours: int = 3

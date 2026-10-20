@@ -209,6 +209,7 @@ class SchedulePluginTests(unittest.TestCase):
         self.assertEqual(
             names,
             [
+                "hq_solicitar_capacidad",
                 "hq_trabajo_largo",
                 "hq_schedule_request",
                 "hq_schedule_approve",

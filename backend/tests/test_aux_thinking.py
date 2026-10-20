@@ -34,7 +34,9 @@ def _config(thinking_mode, auxiliary_models=None):
             patch.object(manager, "_interaction_runtime_overrides", return_value={}),
             patch(
                 "hermeshq.services.hermes_installation.manager.get_settings",
-                return_value=SimpleNamespace(model_context_length=0),
+                return_value=SimpleNamespace(
+                    model_context_length=0, agent_memory_char_limit=3000, user_memory_char_limit=1800
+                ),
             ),
         ):
             manager._write_config(

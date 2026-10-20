@@ -76,6 +76,46 @@ def _extract_tool_calls(messages: list[dict]) -> list[dict]:
     return extracted
 
 
+def _activar_guardia(payload: dict) -> None:
+    if not payload.get("workspace_guard", True):
+        return
+    try:
+        import importlib.util
+
+        carpeta = Path(__file__).resolve().parent / "guard_site"
+        spec = importlib.util.spec_from_file_location("hermeshq_workspace_guard", carpeta / "workspace_guard.py")
+        modulo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modulo)
+        os.environ["HERMES_SESSION_CWD"] = os.environ.get("HERMES_SESSION_CWD") or payload["cwd"]
+        modulo.install(payload["cwd"])
+        previo = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = str(carpeta) + (os.pathsep + previo if previo else "")
+    except Exception as exc:  # noqa: BLE001  # a failure to enable the guard must be visible but must not stop the task
+        _emit({"event": "warning", "warning": f"could not enable the workspace guard: {exc}"})
+
+
+def _activar_pensamiento_adaptativo() -> None:
+    """Thinking stays on for planning calls and is switched off for the calls that only digest tool results."""
+    try:
+        from openai.resources.chat.completions import Completions
+
+        original = Completions.create
+
+        def create(self, *args, **kwargs):
+            mensajes = kwargs.get("messages") or []
+            if mensajes and isinstance(mensajes[-1], dict) and mensajes[-1].get("role") == "tool":
+                extra = dict(kwargs.get("extra_body") or {})
+                plantilla = dict(extra.get("chat_template_kwargs") or {})
+                plantilla["enable_thinking"] = False
+                extra["chat_template_kwargs"] = plantilla
+                kwargs["extra_body"] = extra
+            return original(self, *args, **kwargs)
+
+        Completions.create = create
+    except Exception as exc:  # noqa: BLE001  # without the patch the run simply keeps thinking on
+        _emit({"event": "warning", "warning": f"could not enable adaptive thinking: {exc}"})
+
+
 def main() -> int:
     _abrir_salida()
     # Payload arrives via stdin (keeps the API key out of the process
@@ -102,6 +142,9 @@ def main() -> int:
     os.environ.setdefault("TERM", "xterm-256color")
 
     os.chdir(payload["cwd"])
+    _activar_guardia(payload)
+    if payload.get("thinking_adaptive"):
+        _activar_pensamiento_adaptativo()
 
     # ── Plugin discovery ────────────────────────────────────────
     # One-shot task subprocesses construct AIAgent directly and never enter a

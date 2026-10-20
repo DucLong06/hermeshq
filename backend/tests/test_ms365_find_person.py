@@ -47,6 +47,23 @@ class TestFindPerson(unittest.TestCase):
         ):
             return json.loads(self.mod._find_person_tool(args))
 
+    def test_several_people_are_found_in_one_call(self):
+        out = self._run(
+            {"names": ["ana torres", "luis perez", "   "]},
+            mail=[
+                _msg(("Ana Torres", "atorres@example.com")),
+                _msg(("Luis Perez", "lperez@example.com")),
+            ],
+        )
+        self.assertTrue(out["success"])
+        self.assertEqual([b["buscado"] for b in out["busquedas"]], ["ana torres", "luis perez"])
+        direcciones = [[c["address"] for c in b["resultado"]["candidates"]] for b in out["busquedas"]]
+        self.assertEqual(direcciones, [["atorres@example.com"], ["lperez@example.com"]])
+
+    def test_a_list_of_only_blanks_is_rejected(self):
+        out = self._run({"names": [" ", ""]})
+        self.assertFalse(out["success"])
+
     def test_filters_by_name_and_ignores_accents(self):
         out = self._run(
             {"name": "ana torres"},

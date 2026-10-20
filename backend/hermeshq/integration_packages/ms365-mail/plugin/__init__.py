@@ -611,7 +611,21 @@ def _directory_search(token: str, name: str, tokens: list[str], found: dict) -> 
     return f"No se pudo consultar el directorio: {ultimo_error}" if ultimo_error else None
 
 
+_MAX_PEOPLE_PER_CALL = 5
+
+
 def _find_person_tool(args: dict, **_kwargs) -> str:
+    names = args.get("names")
+    if isinstance(names, list) and names:
+        searches = []
+        for person in [str(n) for n in names if str(n or "").strip()][:_MAX_PEOPLE_PER_CALL]:
+            outcome = json.loads(_find_person_tool({"name": person, "max_results": args.get("max_results")}))
+            searches.append({"buscado": person, "resultado": outcome})
+        if not searches:
+            return json.dumps({"success": False, "error": "Se requiere names (lista de nombres) o name."})
+        return json.dumps(
+            {"success": any(x["resultado"].get("success") for x in searches), "busquedas": searches}, ensure_ascii=False
+        )
     user_id = _task_user_id()
     if not user_id:
         return json.dumps({"success": False, "error": "No se pudo determinar el usuario de esta tarea."})
@@ -1732,9 +1746,14 @@ def register(ctx):
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Nombre o apellido a buscar (ej. 'Ana Torres')"},
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Varias personas en UNA llamada (hasta 5), en vez de llamar la herramienta una por una.",
+                    },
                     "max_results": {"type": "integer", "description": "Máximo de candidatos (default 8, máx 20)"},
                 },
-                "required": ["name"],
+                "required": [],
             },
         },
         handler=_find_person_tool,

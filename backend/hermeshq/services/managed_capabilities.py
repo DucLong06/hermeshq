@@ -72,6 +72,12 @@ CORE_MANAGED_PLUGIN_CATALOG: list[dict] = [
         "toolset": "hermeshq_xlsx",
         "standard_compatible": True,
     },
+    {
+        "slug": "hermeshq_lote",
+        "template_dir": "hermeshq_lote",
+        "toolset": "hermeshq_lote",
+        "standard_compatible": True,
+    },
 ]
 
 

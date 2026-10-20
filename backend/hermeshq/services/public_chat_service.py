@@ -22,8 +22,15 @@ from hermeshq.models.public_chat import (
 )
 from hermeshq.models.task import Task
 from hermeshq.models.user import User
-from hermeshq.services.cancel_intent import is_cancel_request
+from hermeshq.services.cancel_intent import (
+    is_ack_request,
+    is_cancel_request,
+    is_reset_request,
+    is_status_request,
+    split_reset_prefix,
+)
 from hermeshq.services.channel_user_resolver import resolve_channel_user
+from hermeshq.services.schedule_approval import approval_code_from, approve_by_code
 from hermeshq.services.task_board import next_board_order, runtime_status_to_board_column
 
 logger = logging.getLogger(__name__)
@@ -31,6 +38,13 @@ logger = logging.getLogger(__name__)
 PUBLIC_CHAT_USER_ID = "__public_chat__"
 SENDER_PLATFORM = "microsoft_teams"
 MAX_ACTIVE_SESSIONS_PER_KEY = 50
+RACHA_FALLOS_MINIMA = 3
+RACHA_FALLOS_VENTANA = 4
+RACHA_HORAS = 4
+RACHA_ERRORES = ("exceeded the task timeout", "produced no output for", "no result payload", "stopped early")
+RESPUESTA_RAPIDA_MINUTOS = 60
+EXITO_REAL_SEGUNDOS = 90
+EXITO_REAL_ITERACIONES = 4
 MAX_ASSISTANT_MESSAGE_LENGTH = 32_768
 
 
@@ -272,11 +286,131 @@ class PublicChatService:
     @staticmethod
     def _task_belongs_to_chat(task: Task, session_id: str, thread_user_id: str) -> bool:
         metadata = task.metadata_json or {}
+        if metadata.get("background_job"):
+            return thread_user_id != PUBLIC_CHAT_USER_ID and metadata.get("thread_user_id") == thread_user_id
         if metadata.get("source") != "public_chat":
             return False
         if metadata.get("public_session_id") == session_id:
             return True
         return thread_user_id != PUBLIC_CHAT_USER_ID and metadata.get("thread_user_id") == thread_user_id
+
+    @staticmethod
+    def _reset_marker(session, session_id: str, thread_user_id: str, automatico: bool = False) -> Task:
+        task = Task(
+            agent_id=session.agent_id,
+            created_by_user_id=None,
+            title="Reinicio automático de conversación" if automatico else "Reinicio de conversación",
+            prompt="/reset",
+            status="completed",
+            response="Conversación reiniciada",
+            completed_at=utcnow(),
+            metadata_json={
+                "conversation": True,
+                "reset": True,
+                **({"auto_reset": True} if automatico else {}),
+                "source": "public_chat",
+                "public_session_id": session_id,
+                "thread_user_id": thread_user_id,
+            },
+        )
+        task.board_column = runtime_status_to_board_column("completed")
+        task.board_order = next_board_order()
+        task.board_manual = False
+        return task
+
+    @staticmethod
+    def calcular_racha(tareas: list, ahora=None) -> dict:
+        """Fallos por tiempo agotado de este chat (más recientes primero), desde el último reinicio y dentro de RACHA_HORAS.
+
+        consecutivos: seguidos desde la última tarea que sí avanzó; ventana: todos los de la ventana, aunque haya habido avances.
+        """
+        ahora = ahora or utcnow()
+        consecutivos, ventana, segundos, cortada = 0, 0, 0.0, False
+        for tarea in tareas:
+            metadata = getattr(tarea, "metadata_json", None) or {}
+            if metadata.get("reset"):
+                break
+            encolada = getattr(tarea, "queued_at", None)
+            if encolada is not None and ahora - encolada > timedelta(hours=RACHA_HORAS):
+                break
+            inicio, fin = getattr(tarea, "started_at", None), getattr(tarea, "completed_at", None)
+            duracion = (fin - inicio).total_seconds() if inicio and fin else 0.0
+            estado = getattr(tarea, "status", "")
+            if estado == "failed" and any(m in (getattr(tarea, "error_message", "") or "") for m in RACHA_ERRORES):
+                ventana += 1
+                segundos += duracion
+                if not cortada:
+                    consecutivos += 1
+            elif estado == "completed" and (
+                duracion >= EXITO_REAL_SEGUNDOS or (getattr(tarea, "iterations", 0) or 0) >= EXITO_REAL_ITERACIONES
+            ):
+                cortada = True
+        return {"consecutivos": consecutivos, "ventana": ventana, "minutos": round(segundos / 60)}
+
+    @staticmethod
+    def debe_reiniciar(racha: dict) -> bool:
+        return racha["consecutivos"] >= RACHA_FALLOS_MINIMA or racha["ventana"] >= RACHA_FALLOS_VENTANA
+
+    async def _racha_del_chat(self, db, session, session_id: str, thread_user_id: str) -> dict:
+        resultado = await db.execute(
+            select(Task).where(Task.agent_id == session.agent_id).order_by(Task.queued_at.desc()).limit(25)
+        )
+        propias = [t for t in resultado.scalars().all() if self._task_belongs_to_chat(t, session_id, thread_user_id)]
+        propias = [
+            t for t in propias if (t.metadata_json or {}).get("conversation") or (t.metadata_json or {}).get("reset")
+        ]
+        return self.calcular_racha(propias)
+
+    @staticmethod
+    def _status_reply(tasks: list) -> str:
+        ahora = utcnow()
+        corriendo = [t for t in tasks if t.status == "running"]
+        orden = sorted(
+            corriendo or tasks, key=lambda t: bool((getattr(t, "metadata_json", None) or {}).get("background_job"))
+        )
+        principal = orden[0]
+        inicio = principal.started_at or principal.queued_at
+        segundos = max(0, int((ahora - inicio).total_seconds())) if inicio else 0
+        tiempo = f"{segundos // 60} min {segundos % 60:02d} s" if segundos >= 60 else f"{segundos} s"
+        metadata = getattr(principal, "metadata_json", None) or {}
+        if metadata.get("background_job"):
+            titulo = metadata.get("background_title") or "tu análisis"
+            return (
+                f"⏳ Tu trabajo en segundo plano «{titulo}» sigue en curso (lleva {tiempo}). "
+                "Te aviso por aquí apenas termine; mientras tanto puedes seguir pidiéndome otras cosas. "
+                "Si prefieres detenerlo, escribe «cancela»."
+            )
+        pedido = " ".join((principal.prompt or "").split())
+        pedido = pedido[:90] + "…" if len(pedido) > 90 else pedido
+        if corriendo:
+            estado = f"⏳ Sigo trabajando en tu solicitud (llevo {tiempo}): «{pedido}»."
+        else:
+            estado = f"⏳ Tu solicitud está en cola y empieza en breve: «{pedido}»."
+        extra = f" Tienes {len(tasks) - 1} mensaje(s) más esperando." if len(tasks) > 1 else ""
+        return (
+            estado
+            + extra
+            + " Te respondo apenas termine; no hace falta reenviarla. Si prefieres detenerla, escribe «cancela»."
+        )
+
+    async def _failed_attempt_reply(self, db, session, session_id: str, thread_user_id: str) -> str | None:
+        result = await db.execute(
+            select(Task).where(Task.agent_id == session.agent_id).order_by(Task.queued_at.desc()).limit(25)
+        )
+        propias = [t for t in result.scalars().all() if self._task_belongs_to_chat(t, session_id, thread_user_id)]
+        propias = [t for t in propias if (t.metadata_json or {}).get("conversation")]
+        if not propias:
+            return None
+        ultima = propias[0]
+        reciente = ultima.completed_at and utcnow() - ultima.completed_at <= timedelta(minutes=RESPUESTA_RAPIDA_MINUTOS)
+        if ultima.status != "failed" or not reciente or "exceeded the task timeout" not in (ultima.error_message or ""):
+            return None
+        pedido = " ".join((ultima.prompt or "").split())
+        pedido = pedido[:90] + "…" if len(pedido) > 90 else pedido
+        return (
+            f"⚠️ Mi intento anterior se agotó antes de terminar tu solicitud «{pedido}». "
+            "Escribe «hazlo en segundo plano» y la retomo aparte, con hasta 60 minutos, y te aviso por aquí con el resultado."
+        )
 
     async def handle_cancel_request(
         self,
@@ -287,8 +421,12 @@ class PublicChatService:
         *,
         client_ip: str = "",
     ) -> str | None:
-        """If the message only asks to stop, cancel this chat's running tasks and return the reply text."""
-        if not is_cancel_request(content):
+        """If the message only asks to stop (or to reset), cancel this chat's running tasks and return the reply text."""
+        approval_code = approval_code_from(content)
+        reset = is_reset_request(content)
+        status = not reset and not is_cancel_request(content) and is_status_request(content)
+        ack = not reset and not status and not is_cancel_request(content) and is_ack_request(content)
+        if not reset and not status and not ack and not approval_code and not is_cancel_request(content):
             return None
         if not self.rate_limiter.check(session_id):
             raise ValueError("Rate limit exceeded")
@@ -302,6 +440,32 @@ class PublicChatService:
             select(Task).where(Task.agent_id == session.agent_id, Task.status.in_(("running", "queued")))
         )
         mine = [task for task in result.scalars().all() if self._task_belongs_to_chat(task, session_id, thread_user_id)]
+        if approval_code:
+            if thread_user_id == PUBLIC_CHAT_USER_ID:
+                return None
+            reply = await approve_by_code(db, session.agent_id, thread_user_id, approval_code, "public_chat")
+            if reply is None:
+                return None
+            db.add(PublicChatMessage(session_id=session_id, role="user", content=content))
+            db.add(PublicChatMessage(session_id=session_id, role="assistant", content=reply))
+            await db.commit()
+            return reply
+        if ack and not any((task.metadata_json or {}).get("background_job") for task in mine):
+            return None
+        if status or ack:
+            if not mine:
+                reply = await self._failed_attempt_reply(db, session, session_id, thread_user_id)
+                if not reply:
+                    return None
+                db.add(PublicChatMessage(session_id=session_id, role="user", content=content))
+                db.add(PublicChatMessage(session_id=session_id, role="assistant", content=reply))
+                await db.commit()
+                return reply
+            reply = self._status_reply(mine)
+            db.add(PublicChatMessage(session_id=session_id, role="user", content=content))
+            db.add(PublicChatMessage(session_id=session_id, role="assistant", content=reply))
+            await db.commit()
+            return reply
         active = getattr(self.supervisor, "active_tasks", {})
         for task in mine:
             if task.id in active:
@@ -310,7 +474,10 @@ class PublicChatService:
                 task.status = "cancelled"
                 task.completed_at = utcnow()
                 task.board_column = runtime_status_to_board_column("cancelled")
-        if mine:
+        if reset:
+            db.add(self._reset_marker(session, session_id, thread_user_id))
+            reply = "🧹 Listo, conversación reiniciada: empezamos de cero. ¿Qué necesitas?"
+        elif mine:
             reply = (
                 "⏹️ Listo, cancelé la tarea en curso. ¿Qué necesitas ahora?"
                 if len(mine) == 1
@@ -352,6 +519,20 @@ class PublicChatService:
 
         thread_user_id, binding_denied = await self._resolve_identity(api_key, session, db)
 
+        resto = split_reset_prefix(content)
+        if resto:
+            db.add(self._reset_marker(session, session_id, thread_user_id))
+            await db.flush()
+            content = resto
+
+        aviso_racha = None
+        if not resto:
+            racha = await self._racha_del_chat(db, session, session_id, thread_user_id)
+            if self.debe_reiniciar(racha):
+                db.add(self._reset_marker(session, session_id, thread_user_id, automatico=True))
+                await db.flush()
+                aviso_racha = {"fallos": racha["ventana"], "minutos": racha["minutos"]}
+
         user_msg = PublicChatMessage(
             session_id=session_id,
             role="user",
@@ -369,6 +550,8 @@ class PublicChatService:
             "public_session_id": session_id,
             "thread_user_id": thread_user_id,
         }
+        if aviso_racha:
+            task_metadata["auto_reset_aviso"] = aviso_racha
         if thread_user_id != PUBLIC_CHAT_USER_ID:
             task_metadata["public_chat_bound_user_id"] = thread_user_id
             if api_key and not api_key.bound_user_id:

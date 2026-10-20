@@ -14,6 +14,7 @@ from sqlalchemy.orm import aliased
 
 logger = logging.getLogger(__name__)
 
+PROGRESS_NOTICE_SECONDS = 180
 
 HISTORY_USER_MARKER = "[Mensaje anterior, ya respondido; no lo repitas] "
 
@@ -185,8 +186,9 @@ from hermeshq.models.messaging_channel import MessagingChannel
 from hermeshq.models.node import Node
 from hermeshq.models.secret import Secret
 from hermeshq.models.task import Task
+from hermeshq.services.auto_background import create_continuation
 from hermeshq.services.hermes_runtime import HermesRuntime
-from hermeshq.services.schedule_notifications import enqueue_schedule_notification
+from hermeshq.services.schedule_notifications import enqueue_progress_notice, enqueue_schedule_notification
 from hermeshq.services.secret_vault import SecretVault
 from hermeshq.services.task_board import sync_board_with_runtime
 
@@ -266,6 +268,10 @@ class AgentSupervisor:
             and (not thread_id or str((item.metadata_json or {}).get("thread_id") or "").strip() == thread_id)
             and (cutoff is None or item.queued_at is None or item.queued_at >= cutoff)
         ]
+        for indice in range(len(prior_turns) - 1, -1, -1):
+            if (prior_turns[indice].metadata_json or {}).get("reset"):
+                prior_turns = prior_turns[indice + 1 :]
+                break
         history: list[dict] = []
         for prior in prior_turns[-6:]:
             if prior.prompt.strip():
@@ -367,6 +373,13 @@ class AgentSupervisor:
                     task.error_message = f"Task lease expired after {task.attempt_count} execution attempts."
                     event_type = "task.failed"
                     message = "Task exceeded recovery attempts"
+                    if (task.metadata_json or {}).get("background_job"):
+                        await enqueue_schedule_notification(
+                            session,
+                            task,
+                            success=False,
+                            summary="el servidor se reinició mientras lo trabajaba; vuelve a pedirlo",
+                        )
                 else:
                     task.status = "queued"
                     task.started_at = None
@@ -746,6 +759,25 @@ class AgentSupervisor:
             if runner is not None:
                 runner.cancel()
 
+    async def _progress_notice_after(self, task_id: str, seconds: int) -> None:
+        try:
+            await asyncio.sleep(seconds)
+            async with self.session_factory() as session:
+                task = await session.get(Task, task_id)
+                if not task or task.status != "running":
+                    return
+                minutes = max(1, seconds // 60)
+                body = (
+                    f"⏳ Sigo trabajando en tu solicitud (lleva más de {minutes} min). Te respondo apenas termine; "
+                    "no hace falta reenviarla. Si prefieres detenerla, escribe «cancela»."
+                )
+                if await enqueue_progress_notice(session, task, body):
+                    await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001  # the heads-up is best-effort and must never touch the task
+            logger.exception("Could not send the progress notice for task %s", task_id)
+
     async def _run_task(self, task_id: str, claim_token: str) -> None:
         callbacks: list = []
         try:
@@ -817,6 +849,7 @@ class AgentSupervisor:
             async def stream_callback(delta: str, index: int | None = None) -> None:
                 await stream_buffer.push(delta, index)
 
+            progress_timer = asyncio.create_task(self._progress_notice_after(task_id, PROGRESS_NOTICE_SECONDS))
             try:
                 runtime = self.runtimes.get(agent.runtime_type or "hermes", self.runtimes["hermes"])
                 execution = await runtime.execute(
@@ -827,6 +860,7 @@ class AgentSupervisor:
                     session_id=session_id,
                 )
             finally:
+                progress_timer.cancel()
                 await stream_buffer.stop_flush_loop()
             async with self.session_factory() as session:
                 task = (
@@ -968,6 +1002,7 @@ class AgentSupervisor:
                 )
         except Exception as exc:  # noqa: BLE001  # task cancellation catch-all
             failed_event: dict | None = None
+            auto_job_id = None
             async with self.session_factory() as session:
                 task = (
                     await session.execute(
@@ -991,6 +1026,11 @@ class AgentSupervisor:
                     task.claimed_at = None
                     task.lease_expires_at = None
                     task.cancel_requested_at = None
+                    try:
+                        auto_job = await create_continuation(session, task, str(exc))
+                        auto_job_id = auto_job.id if auto_job else None
+                    except Exception:  # noqa: BLE001  # the continuation is best-effort
+                        logger.exception("Could not start the automatic background continuation")
                 if task and agent:
                     agent.last_activity = utcnow()
                     await self._log(
@@ -1024,6 +1064,8 @@ class AgentSupervisor:
                     await enqueue_schedule_notification(session, task, success=False, summary=str(exc))
                 await session.commit()
                 await self._drain_callbacks(callbacks)
+                if auto_job_id:
+                    await self.submit_task(auto_job_id)
                 if task:
                     failed_event = {
                         "type": "task.failed",
@@ -1032,6 +1074,8 @@ class AgentSupervisor:
                         "error": str(exc),
                         "error_type": type(exc).__name__,
                     }
+                    if auto_job_id:
+                        failed_event["auto_background"] = True
                     if task.created_by_user_id:
                         failed_event["created_by_user_id"] = task.created_by_user_id
             if failed_event is not None:

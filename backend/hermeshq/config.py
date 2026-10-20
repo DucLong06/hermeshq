@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     workspace_isolation: bool = True
     agent_memory_char_limit: int = 3000
     user_memory_char_limit: int = 1800
+    background_job_timeout_seconds: int = 3600
     scheduled_tasks_thinking: str = "off"
     conversation_history_max_age_hours: int = 3
     conversation_history_turn_max_chars: int = 4000

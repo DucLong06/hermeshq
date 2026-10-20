@@ -2,13 +2,62 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
 
 
+def _diag(mensaje: str) -> None:
+    print(f"[runner] {mensaje}", file=sys.stderr, flush=True)
+
+
+_SALIDA = None
+
+
+def _abrir_salida() -> None:
+    """Guarda una copia propia del canal de salida (fd 1) antes de que el agente toque sys.stdout."""
+    global _SALIDA
+    try:
+        _SALIDA = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1, closefd=True)
+    except OSError:
+        _SALIDA = None
+
+
+def _escribir(linea: str) -> None:
+    destino = _SALIDA if _SALIDA is not None else sys.stdout
+    destino.write(linea + "\n")
+    destino.flush()
+
+
 def _emit(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    try:
+        _escribir(json.dumps(payload, ensure_ascii=False))
+    except (UnicodeEncodeError, ValueError) as exc:
+        _diag(f"no se pudo escribir el evento {payload.get('event')} en UTF-8 ({exc}); se reenvía en ASCII")
+        _escribir(json.dumps(payload, ensure_ascii=True))
+
+
+_AVISOS_INTERNOS = (
+    re.compile(r"⚠️?\s*Response truncated \(finish_reason='length'\)[^⚠\n]*"),
+    re.compile(r"⚠️?\s*Truncated tool call[^\n]*?retrying API call\.\.\."),
+    re.compile(r"❌\s*Max retries[^\n]*"),
+    re.compile(r"\[Tool loop warning:[^\]]*\]"),
+)
+
+
+def limpiar_aviso_interno(texto: str) -> str:
+    """Quita del texto que ve el usuario los avisos internos del motor (cortes por tamaño, reintentos, bucles)."""
+    for patron in _AVISOS_INTERNOS:
+        texto = patron.sub("", texto)
+    return texto
+
+
+def texto_final(result: dict, emitted_chunks: list) -> str:
+    final = result.get("final_response")
+    if isinstance(final, str) and final.strip():
+        return final.strip()
+    return "".join(chunk for chunk in emitted_chunks if isinstance(chunk, str)).strip()
 
 
 def _extract_tool_calls(messages: list[dict]) -> list[dict]:
@@ -68,6 +117,7 @@ def _activar_pensamiento_adaptativo() -> None:
 
 
 def main() -> int:
+    _abrir_salida()
     # Payload arrives via stdin (keeps the API key out of the process
     # environment, where it would be visible via /proc/<pid>/environ).
     # Fall back to the legacy env var for backwards compatibility.
@@ -148,7 +198,15 @@ def main() -> int:
 
         emitted_chunks: list[str] = []
 
-        def on_delta(delta: str) -> None:
+        def on_delta(delta) -> None:
+            if delta is None:
+                _emit({"event": "segment_break"})
+                return
+            if not isinstance(delta, str):
+                return
+            delta = limpiar_aviso_interno(delta)
+            if not delta:
+                return
             emitted_chunks.append(delta)
             _emit({"event": "delta", "data": delta})
 
@@ -178,12 +236,19 @@ def main() -> int:
         )
 
         messages = result.get("messages", [])
-        final_response = (result.get("final_response") or "".join(emitted_chunks)).strip()
+        _diag(
+            f"conversación terminada: partial={result.get('partial')} completed={result.get('completed')} "
+            f"claves={sorted(result)} mensajes={len(result.get('messages') or [])}"
+        )
+        if result.get("partial") and not result.get("final_response"):
+            raise RuntimeError(f"Hermes runtime stopped early: {result.get('error') or 'partial result'}")
+        final_response = texto_final(result, emitted_chunks)
         tool_calls = _extract_tool_calls(messages)
         assistant_messages = [message for message in messages if message.get("role") == "assistant"]
         if not final_response and not assistant_messages and not tool_calls:
             raise RuntimeError("Hermes runtime returned no assistant output")
 
+        _diag("emitiendo el resultado final")
         _emit(
             {
                 "event": "result",

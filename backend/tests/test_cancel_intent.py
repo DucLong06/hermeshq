@@ -1,6 +1,6 @@
 import unittest
 
-from hermeshq.services.cancel_intent import is_cancel_request
+from hermeshq.services.cancel_intent import is_ack_request, is_cancel_request
 
 
 class TestCancelIntent(unittest.TestCase):
@@ -72,3 +72,13 @@ class TestCancelIntent(unittest.TestCase):
     def test_long_messages_are_never_cancels(self):
         long_text = "para " + "palabra " * 30
         self.assertFalse(is_cancel_request(long_text))
+
+
+class TestAckIntent(unittest.TestCase):
+    def test_short_acknowledgements(self):
+        for text in ["ok", "Dale", "listo!", "ok, gracias", "sí"]:
+            self.assertTrue(is_ack_request(text), text)
+
+    def test_real_requests_are_not_acks(self):
+        for text in ["", None, "ok dame el informe", "hola", "dale con el resumen de ventas"]:
+            self.assertFalse(is_ack_request(text), text)

@@ -178,3 +178,110 @@ def is_cancel_request(text: str | None) -> bool:
             continue
         return False
     return strong_hit or phrase_hit
+
+
+RESET_COMMANDS = {
+    "/reset",
+    "/nuevo",
+    "/nueva",
+    "/limpiar",
+    "/new",
+    "reset",
+    "reiniciar conversacion",
+    "reiniciar conversación",
+}
+
+
+def is_reset_request(text: str | None) -> bool:
+    return bool(text) and text.strip().lower().rstrip(".!") in RESET_COMMANDS
+
+
+RESET_PREFIX = re.compile(r"^\s*/(?:reset|nuevo|nueva|new|limpiar)\b[\s:,.-]*(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def split_reset_prefix(text: str | None) -> str | None:
+    match = RESET_PREFIX.match(text or "")
+    return match.group(1).strip() if match and match.group(1).strip() else None
+
+
+STATUS_PHRASES = (
+    "como va",
+    "como vas",
+    "que paso",
+    "que pasa",
+    "que pasó",
+    "por que demoras",
+    "por que tardas",
+    "por que te demoras",
+    "porque demoras",
+    "porque tardas",
+    "estas ahi",
+    "sigues ahi",
+    "sigues trabajando",
+    "sigue trabajando",
+    "cuanto falta",
+    "cuanto demora",
+    "cuanto tardas",
+    "ya esta",
+    "ya terminaste",
+    "novedades",
+    "no obtuve respuesta",
+    "no me responde",
+    "no responde",
+    "y el informe",
+    "y mi informe",
+    "y el entregable",
+    "y la pptx",
+    "y el archivo",
+    "y el zip",
+    "y la presentacion",
+    "y el resultado",
+    "estado de la solicitud",
+    "estado de mi solicitud",
+    "estado del informe",
+)
+STATUS_MAX_WORDS = 10
+
+
+def is_status_request(text: str | None) -> bool:
+    if not text:
+        return False
+    normalized = _normalize(text).strip()
+    tokens = normalized.split()
+    if not tokens or len(tokens) > STATUS_MAX_WORDS:
+        return False
+    padded = f" {' '.join(tokens)} "
+    return any(f" {_normalize(phrase).strip()} " in padded for phrase in STATUS_PHRASES)
+
+
+ACK_WORDS = frozenset(
+    {
+        "ok",
+        "okey",
+        "okay",
+        "dale",
+        "listo",
+        "ya",
+        "vale",
+        "perfecto",
+        "gracias",
+        "arranca",
+        "arraca",
+        "empieza",
+        "avanza",
+        "sigue",
+        "continua",
+        "continuar",
+        "seguimos",
+        "hazlo",
+        "si",
+    }
+)
+ACK_MAX_WORDS = 2
+
+
+def is_ack_request(text: str | None) -> bool:
+    if not text:
+        return False
+    tokens = _normalize(text).strip().split()
+    return 0 < len(tokens) <= ACK_MAX_WORDS and all(token in ACK_WORDS for token in tokens)

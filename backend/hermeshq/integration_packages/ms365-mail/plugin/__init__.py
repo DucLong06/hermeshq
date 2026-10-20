@@ -1347,17 +1347,38 @@ def _kql_date(value, label) -> tuple[str | None, str | None]:
     return (parsed[:10] if parsed else None), None
 
 
+_KQL_EMBEDDED_FIELD = re.compile(r'\b(from|subject|to|cc)\s*:\s*(?:"([^"]*)"|(\S+))', re.IGNORECASE)
+
+
+def _split_embedded_fields(query: str) -> tuple[str, dict[str, str]]:
+    fields: dict[str, str] = {}
+
+    def take(match):
+        name = match.group(1).lower()
+        value = _kql_value(match.group(2) if match.group(2) is not None else match.group(3))
+        if value and name not in fields:
+            fields[name] = value
+        return " "
+
+    rest = _KQL_EMBEDDED_FIELD.sub(take, query)
+    rest = re.sub(r"\b(from|subject|to|cc)\s*:", " ", rest, flags=re.IGNORECASE)
+    return " ".join(_kql_value(rest).split()), fields
+
+
 def _build_search_kql(args: dict) -> tuple[str | None, str | None]:
     parts = []
-    query = _kql_value(args.get("query"))
+    query, embedded = _split_embedded_fields(str(args.get("query") or ""))
     if query:
         parts.append(query)
-    sender = _kql_value(args.get("from"))
+    sender = _kql_value(args.get("from")) or embedded.get("from", "")
     if sender:
         parts.append(f'from:"{sender}"')
-    subject = _kql_value(args.get("subject"))
+    subject = _kql_value(args.get("subject")) or embedded.get("subject", "")
     if subject:
         parts.append(f'subject:"{subject}"')
+    for name in ("to", "cc"):
+        if embedded.get(name):
+            parts.append(f'{name}:"{embedded[name]}"')
     since, error = _kql_date(args.get("since"), "since")
     if error:
         return None, error
@@ -1397,7 +1418,10 @@ def _search_emails_tool(args: dict, **_kwargs) -> str:
     path = f"{base}?$search=%22{urllib.parse.quote(kql, safe='')}%22&$top={count}&$select={fields}"
     result = _graph("GET", path, token)
     if "error" in result:
-        return json.dumps({"success": False, "error": result["error"]})
+        error = str(result["error"])
+        if "Syntax error" in error:
+            error += " Usa los parámetros from, subject y since en vez de escribir filtros dentro de query."
+        return json.dumps({"success": False, "error": error})
     messages = sorted(result.get("value", []), key=lambda m: m.get("receivedDateTime") or "", reverse=True)
     _cap_previews(messages, preview_chars)
     _remember_ids(messages)

@@ -11,6 +11,7 @@ from hermeshq.core.security import can_access_agent, verify_agent_service_token
 from hermeshq.database import get_db_session
 from hermeshq.models.activity import ActivityLog
 from hermeshq.models.agent import Agent
+from hermeshq.models.capability_request import CapabilityRequest
 from hermeshq.models.scheduled_task import ScheduledTask
 from hermeshq.models.task import Task
 from hermeshq.models.user import User
@@ -348,6 +349,104 @@ async def create_own_schedule(
             "Results of scheduled runs always appear in HermesHQ web (Tasks and the agent conversation panel). "
             "They are also queued for delivery to this chat when the chat bridge supports notifications, so do "
             "not promise it will arrive here."
+        ),
+    }
+
+
+class InternalCapabilityRequest(BaseModel):
+    task_id: str | None = None
+    title: str
+    description: str
+    example: str | None = None
+    attempts: str | None = None
+    files: list[str] = []
+
+
+@router.post("/capability-requests", status_code=status.HTTP_201_CREATED)
+async def create_capability_request(
+    payload: InternalCapabilityRequest,
+    agent: Agent = Depends(_get_internal_agent),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    from datetime import timedelta
+
+    from hermeshq.services.capability_requests import (
+        MAX_REQUESTS_PER_AGENT_PER_DAY,
+        MAX_TITLE_CHARS,
+        clean_files,
+        clean_text,
+        fingerprint,
+    )
+
+    origin = await db.get(Task, payload.task_id.strip()) if payload.task_id else None
+    if not origin or origin.agent_id != agent.id or origin.status != "running":
+        raise HTTPException(status_code=403, detail="Las solicitudes solo se registran desde una conversación en curso")
+    title = " ".join(payload.title.split())[:MAX_TITLE_CHARS]
+    description = clean_text(payload.description)
+    if not title or not description:
+        raise HTTPException(status_code=400, detail="'title' y 'description' son obligatorios")
+    user_id = str((origin.metadata_json or {}).get("thread_user_id") or "").strip() or None
+    marca = fingerprint(title)
+    abiertas = await db.execute(
+        select(CapabilityRequest).where(
+            CapabilityRequest.fingerprint == marca, CapabilityRequest.status.in_(("nuevo", "en_curso"))
+        )
+    )
+    existente = abiertas.scalars().first()
+    if existente:
+        existente.me_too_count += 1
+        if payload.example and not existente.example:
+            existente.example = clean_text(payload.example)
+        await db.commit()
+        return {
+            "success": True,
+            "request_id": existente.id,
+            "ya_existia": True,
+            "message": (
+                "Ya había una solicitud igual registrada (suma esta como otra persona que la necesita). "
+                "Dile al usuario que quedó anotada y que el administrador la revisará; mientras tanto ofrece la "
+                "alternativa más cercana con las herramientas que ya existen."
+            ),
+        }
+    desde = datetime.now(UTC) - timedelta(days=1)
+    recientes = await db.execute(
+        select(CapabilityRequest.id).where(
+            CapabilityRequest.agent_id == agent.id, CapabilityRequest.created_at >= desde
+        )
+    )
+    if len(recientes.scalars().all()) >= MAX_REQUESTS_PER_AGENT_PER_DAY:
+        raise HTTPException(status_code=429, detail="Se alcanzó el máximo de solicitudes de hoy para este agente")
+    item = CapabilityRequest(
+        agent_id=agent.id,
+        requested_by_user_id=user_id,
+        task_id=origin.id,
+        title=title,
+        description=description,
+        example=clean_text(payload.example) if payload.example else None,
+        attempts=clean_text(payload.attempts) if payload.attempts else None,
+        files_json=clean_files(payload.files),
+        fingerprint=marca,
+    )
+    db.add(item)
+    db.add(
+        ActivityLog(
+            agent_id=agent.id,
+            task_id=origin.id,
+            event_type="capability_request.created",
+            message=title,
+            details={"requested_by_user_id": user_id},
+        )
+    )
+    await db.commit()
+    await db.refresh(item)
+    return {
+        "success": True,
+        "request_id": item.id,
+        "ya_existia": False,
+        "message": (
+            "Solicitud registrada. Dile al usuario, en una o dos frases, que quedó anotada para que el administrador "
+            "la evalúe, y ofrece mientras tanto la alternativa más cercana con las herramientas que ya existen. No "
+            "prometas plazos ni intentes construir la herramienta tú."
         ),
     }
 

@@ -938,6 +938,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/capability-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Capability Requests */
+        get: operations["list_capability_requests_api_capability_requests_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/capability-requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Capability Request */
+        patch: operations["update_capability_request_api_capability_requests__request_id__patch"];
+        trace?: never;
+    };
     "/api/cloud/bindings": {
         parameters: {
             query?: never;
@@ -4102,6 +4136,59 @@ export interface components {
             };
             /** Team Tag */
             team_tag: string;
+        };
+        /** CapabilityRequestRead */
+        CapabilityRequestRead: {
+            /** Agent Id */
+            agent_id: string;
+            /** Agent Name */
+            agent_name?: string | null;
+            /** Attempts */
+            attempts?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string;
+            /** Example */
+            example?: string | null;
+            /**
+             * Files Json
+             * @default []
+             */
+            files_json: unknown[];
+            /** Id */
+            id: string;
+            /** Me Too Count */
+            me_too_count: number;
+            /** Requested By Name */
+            requested_by_name?: string | null;
+            /** Requested By User Id */
+            requested_by_user_id?: string | null;
+            /** Resolution */
+            resolution?: string | null;
+            /** Resolved At */
+            resolved_at?: string | null;
+            /** Status */
+            status: string;
+            /** Task Id */
+            task_id?: string | null;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** CapabilityRequestUpdate */
+        CapabilityRequestUpdate: {
+            /** Resolution */
+            resolution?: string | null;
+            /** Status */
+            status?: string | null;
         };
         /** ChangePasswordRequest */
         ChangePasswordRequest: {
@@ -8714,6 +8801,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InstanceBackupValidationRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_capability_requests_api_capability_requests_get: {
+        parameters: {
+            query?: {
+                status?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                hermeshq_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilityRequestRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_capability_request_api_capability_requests__request_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: {
+                hermeshq_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CapabilityRequestUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilityRequestRead"];
                 };
             };
             /** @description Validation Error */

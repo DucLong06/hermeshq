@@ -102,6 +102,32 @@ def hq_schedule_approve_tool(args, **_kwargs):
     return _api_request("POST", f"/agents/self/schedules/{schedule_id}/approve", {"task_id": task_id})
 
 
+def hq_solicitar_capacidad_tool(args, **_kwargs):
+    titulo = str(args.get("titulo") or "").strip()
+    que_necesita = str(args.get("que_necesita") or "").strip()
+    task_id = str(_task_payload().get("task_id") or "").strip()
+    if not titulo or not que_necesita or not task_id:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "'titulo' y 'que_necesita' son obligatorios y debe haber una conversación en curso",
+            }
+        )
+    archivos = args.get("archivos") if isinstance(args.get("archivos"), list) else []
+    return _api_request(
+        "POST",
+        "/agents/self/capability-requests",
+        {
+            "task_id": task_id,
+            "title": titulo,
+            "description": que_necesita,
+            "example": str(args.get("ejemplo") or "").strip() or None,
+            "attempts": str(args.get("intentos") or "").strip() or None,
+            "files": [str(a) for a in archivos],
+        },
+    )
+
+
 def hq_schedule_list_tool(args, **_kwargs):
     return _api_request("GET", "/agents/self/schedules")
 
@@ -121,7 +147,44 @@ def _check_requirements():
     )
 
 
+DESC_SOLICITAR = (
+    "Registra una SOLICITUD DE CAPACIDAD para el administrador cuando el usuario necesita algo que NINGUNA herramienta o "
+    "skill actual cubre (un tipo nuevo de informe, una integración, un formato de entrega). Úsala en vez de intentar "
+    "fabricarlo a mano con scripts, HTML largo o una skill nueva: eso es lento y falla. Describe lo que el usuario "
+    "quiere con sus palabras, un ejemplo concreto, los archivos de muestra (rutas en el espacio de trabajo) y qué se "
+    "intentó. Después dile al usuario que quedó anotada y ofrece la alternativa más cercana con lo que ya existe. "
+    "No la uses para fallos pasajeros ni para pedidos que sí cubre una herramienta."
+)
+
+
 def register(ctx):
+    ctx.register_tool(
+        name="hq_solicitar_capacidad",
+        toolset="hermeshq_schedule",
+        schema={
+            "name": "hq_solicitar_capacidad",
+            "description": DESC_SOLICITAR,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "titulo": {"type": "string", "description": "Nombre corto de lo que se necesita."},
+                    "que_necesita": {"type": "string", "description": "Lo que quiere el usuario y para qué."},
+                    "ejemplo": {"type": "string", "description": "Un ejemplo concreto (pedido, formato esperado)."},
+                    "archivos": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Rutas de archivos de muestra.",
+                    },
+                    "intentos": {"type": "string", "description": "Qué se intentó y por qué no sirvió."},
+                },
+                "required": ["titulo", "que_necesita"],
+            },
+        },
+        handler=hq_solicitar_capacidad_tool,
+        check_fn=_check_requirements,
+        description="Register a capability request for the administrator",
+        emoji="📝",
+    )
     ctx.register_tool(
         name="hq_schedule_request",
         toolset="hermeshq_schedule",

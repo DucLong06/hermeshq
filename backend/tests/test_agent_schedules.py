@@ -202,12 +202,19 @@ class SchedulePluginTests(unittest.TestCase):
         self.assertFalse(result["success"])
         api.assert_not_called()
 
-    def test_registers_four_tools_in_own_toolset(self):
+    def test_registers_its_tools_in_own_toolset(self):
         ctx = MagicMock()
         self.plugin.register(ctx)
         names = [call.kwargs["name"] for call in ctx.register_tool.call_args_list]
         self.assertEqual(
-            names, ["hq_schedule_request", "hq_schedule_approve", "hq_schedule_list", "hq_schedule_delete"]
+            names,
+            [
+                "hq_solicitar_capacidad",
+                "hq_schedule_request",
+                "hq_schedule_approve",
+                "hq_schedule_list",
+                "hq_schedule_delete",
+            ],
         )
         self.assertTrue(all(call.kwargs["toolset"] == "hermeshq_schedule" for call in ctx.register_tool.call_args_list))
 

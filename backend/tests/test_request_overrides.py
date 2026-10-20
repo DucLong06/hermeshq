@@ -122,6 +122,62 @@ class MigrationChainTests(unittest.TestCase):
         self.assertEqual(len(revisions - downs), 1, sorted(revisions - downs))
 
 
+class TestAdaptiveThinking(unittest.TestCase):
+    def test_adaptive_starts_with_thinking_on_for_the_planning_call(self):
+        self.assertEqual(
+            HermesRuntime._thinking_overrides("adaptive"),
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+        )
+
+    def test_the_agent_setting_accepts_adaptive(self):
+        from hermeshq.routers.agents_shared import THINKING_MODE_OPTIONS
+
+        self.assertIn("adaptive", THINKING_MODE_OPTIONS)
+
+    def test_the_runner_turns_thinking_off_only_for_calls_that_follow_a_tool_result(self):
+        import importlib.util
+        import sys
+        import types
+        from pathlib import Path
+        from unittest.mock import patch
+
+        recibidas = []
+
+        class Completions:
+            def create(self, *args, **kwargs):
+                recibidas.append(kwargs)
+
+        falsos = {"openai": types.ModuleType("openai")}
+        for nombre in ("openai.resources", "openai.resources.chat", "openai.resources.chat.completions"):
+            falsos[nombre] = types.ModuleType(nombre)
+        falsos["openai.resources.chat.completions"].Completions = Completions
+        runner_path = Path(__file__).resolve().parents[1] / "hermeshq" / "scripts" / "hermes_task_runner.py"
+        spec = importlib.util.spec_from_file_location("runner_adaptive_under_test", runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with patch.dict(sys.modules, falsos):
+            runner._activar_pensamiento_adaptativo()
+            llamada = Completions().create
+            llamada(messages=[{"role": "user", "content": "hola"}], extra_body={"x": 1})
+            llamada(messages=[{"role": "user", "content": "hola"}, {"role": "tool", "content": "r"}])
+            llamada(messages=[{"role": "tool", "content": "r"}], extra_body={"chat_template_kwargs": {"a": 1}})
+        self.assertEqual(recibidas[0]["extra_body"], {"x": 1})
+        self.assertEqual(recibidas[1]["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(recibidas[2]["extra_body"], {"chat_template_kwargs": {"a": 1, "enable_thinking": False}})
+
+
+class TestPlatformRules(unittest.TestCase):
+    def test_every_agent_gets_the_same_rules(self):
+        text = HermesRuntime._with_platform_rules("# ROLE\nYou are an assistant.")
+        for phrase in ("Keep reasoning brief", "Codes, identifiers", "execute_code", "background"):
+            self.assertIn(phrase, text)
+        self.assertTrue(text.startswith("# ROLE\nYou are an assistant."))
+
+    def test_the_rules_only_name_tools_that_exist_in_the_platform(self):
+        for name in ("hq_trabajo_largo", "hq_leer_varios", "hq_buscar_varios", "hq_skills_ver", "hq_editar_varios"):
+            self.assertNotIn(name, HermesRuntime._with_platform_rules(""))
+
+
 if __name__ == "__main__":
     unittest.main()
 

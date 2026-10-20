@@ -484,6 +484,12 @@ class HermesInstallationManager:
             "skills": {
                 "external_dirs": [],
             },
+            "memory": {
+                "memory_enabled": True,
+                "user_profile_enabled": True,
+                "memory_char_limit": get_settings().agent_memory_char_limit,
+                "user_char_limit": get_settings().user_memory_char_limit,
+            },
         }
         model_context_length = get_settings().model_context_length
         if model_context_length > 0:

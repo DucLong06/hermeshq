@@ -10,7 +10,7 @@ from hermeshq.config import Settings
 from hermeshq.services.hermes_installation.manager import HermesInstallationManager
 
 
-def _write_config(context_length):
+def _write_config(context_length, memory_limit=3000, user_limit=1800):
     manager = HermesInstallationManager.__new__(HermesInstallationManager)
     agent = SimpleNamespace(
         runtime_profile="standard",
@@ -31,7 +31,11 @@ def _write_config(context_length):
             patch.object(manager, "_interaction_runtime_overrides", return_value={}),
             patch(
                 "hermeshq.services.hermes_installation.manager.get_settings",
-                return_value=SimpleNamespace(model_context_length=context_length),
+                return_value=SimpleNamespace(
+                    model_context_length=context_length,
+                    agent_memory_char_limit=memory_limit,
+                    user_memory_char_limit=user_limit,
+                ),
             ),
         ):
             manager._write_config(
@@ -55,6 +59,26 @@ class ModelContextLengthTests(unittest.TestCase):
     def test_negative_value_is_ignored(self):
         config = _write_config(-5)
         self.assertNotIn("context_length", config["model"])
+
+
+class MemoryLimitTests(unittest.TestCase):
+    def test_defaults_are_a_little_above_the_hermes_ones(self):
+        settings = Settings(debug=True, jwt_secret="x" * 40)
+        self.assertEqual(settings.agent_memory_char_limit, 3000)
+        self.assertEqual(settings.user_memory_char_limit, 1800)
+
+    def test_the_memory_section_keeps_memory_enabled_and_carries_the_limits(self):
+        memory = _write_config(0)["memory"]
+        self.assertEqual(
+            memory,
+            {
+                "memory_enabled": True,
+                "user_profile_enabled": True,
+                "memory_char_limit": 3000,
+                "user_char_limit": 1800,
+            },
+        )
+        self.assertEqual(_write_config(0, 4000, 2500)["memory"]["memory_char_limit"], 4000)
 
 
 if __name__ == "__main__":

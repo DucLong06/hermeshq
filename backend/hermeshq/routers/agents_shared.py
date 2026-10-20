@@ -52,7 +52,7 @@ APPROVAL_MODE_OPTIONS = {"off", "on-request", "on-failure"}
 
 TOOL_PROGRESS_MODE_OPTIONS = {"on", "off"}
 
-THINKING_MODE_OPTIONS = {"on", "off"}
+THINKING_MODE_OPTIONS = {"on", "off", "adaptive"}
 
 GATEWAY_NOTIFICATIONS_MODE_OPTIONS = {"all", "result", "off"}
 

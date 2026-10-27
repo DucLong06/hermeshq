@@ -46,14 +46,14 @@ class TestLlmModelRouting:
         db = self._make_db([zai])
         db.get = AsyncMock(side_effect=lambda m, k: zai if k == "zai" else None)
 
-        import hermeshq.routers.enrollment as enrollment_router
+        import hermeshq.services.llm_catalog as llm_catalog
 
-        original = enrollment_router._llm_proxy_vault
+        original = llm_catalog.build_proxy_vault
 
         async def fake_vault():
             return "vault"
 
-        enrollment_router._llm_proxy_vault = fake_vault
+        llm_catalog.build_proxy_vault = fake_vault
         try:
             import hermeshq.services.credentials as credentials
 
@@ -76,13 +76,13 @@ class TestLlmModelRouting:
             finally:
                 credentials.resolve_secret_value = original_resolve
         finally:
-            enrollment_router._llm_proxy_vault = original
+            llm_catalog.build_proxy_vault = original
 
     async def test_model_catalog_agent_default_first(self) -> None:
         from types import SimpleNamespace
 
-        import hermeshq.routers.enrollment as enrollment_router
-        from hermeshq.routers.enrollment import _llm_model_catalog
+        import hermeshq.services.llm_catalog as llm_catalog
+        from hermeshq.services.llm_catalog import model_catalog
 
         zai = SimpleNamespace(
             enabled=True,
@@ -105,17 +105,17 @@ class TestLlmModelRouting:
         async def fake_vault():
             return "vault"
 
-        async def fake_ok(session, definition, vault, **kwargs):
+        async def fake_ok(session, definition, vault):
             return definition.api_key_ref != "invalid_openrouter_key"
 
-        original_vault, original_ok = enrollment_router._llm_proxy_vault, enrollment_router._llm_provider_operational
-        enrollment_router._llm_proxy_vault = fake_vault
-        enrollment_router._llm_provider_operational = fake_ok
+        original_vault, original_ok = llm_catalog.build_proxy_vault, llm_catalog.provider_operational
+        llm_catalog.build_proxy_vault = fake_vault
+        llm_catalog.provider_operational = fake_ok
         try:
-            ids = await _llm_model_catalog(self._make_db([zai, dead]), agent)
+            ids = await model_catalog(self._make_db([zai, dead]), agent)
         finally:
-            enrollment_router._llm_proxy_vault = original_vault
-            enrollment_router._llm_provider_operational = original_ok
+            llm_catalog.build_proxy_vault = original_vault
+            llm_catalog.provider_operational = original_ok
         assert ids[0] == "qwen3.8-27b"
         assert "glm-5.3-flash" in ids
         assert "glm-5-turbo" in ids
@@ -164,6 +164,13 @@ class TestBundleLlmProxy:
             async def get(self, model, key):
                 return agent if model.__name__ == "Agent" else None
 
+            async def execute(self, statement):
+                result = MagicMock()
+                scalars = MagicMock()
+                scalars.all.return_value = []
+                result.scalars.return_value = scalars
+                return result
+
         service.session_factory = FakeSession
         built = await service.build_bundle(device)
         payload = built["bundle"]
@@ -172,6 +179,7 @@ class TestBundleLlmProxy:
         assert payload["agent"]["api_key"] is None, "real provider key must NOT ship to the device"
         assert payload["agent"]["base_url"] == payload["llm_proxy"]["base_url"]
         assert payload["agent"]["custom_provider"]["base_url"] == payload["llm_proxy"]["base_url"]
+        assert payload["agent"]["custom_provider"]["models"] == ["qwen3.8-27b"]
         assert payload["guard"]["env"]["HERMESHQ_AGENT_TOKEN"]
         etag = built["etag"]
         assert payload["llm_proxy"]["api_key"]

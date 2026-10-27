@@ -196,6 +196,9 @@ class EnrollmentService:
         from hermeshq.config import get_settings
         from hermeshq.services.provider_catalog import normalize_runtime_provider
 
+        settings = get_settings()
+        llm_proxy_enabled = bool(getattr(settings, "enrollment_llm_proxy", True))
+        proxy_models: list[str] = []
         async with self.session_factory() as session:
             agent = cast(Agent, await session.get(Agent, device.agent_id))
             if not agent or agent.is_archived:
@@ -212,13 +215,15 @@ class EnrollmentService:
                 for p in merged
             ]
             api_key = await self._resolve_agent_api_key(agent)
+            if llm_proxy_enabled and normalize_runtime_provider(agent.provider) == "openai-codex":
+                from hermeshq.services.llm_catalog import model_catalog
 
-        settings = get_settings()
+                proxy_models = await model_catalog(session, agent)
+
         guard_files = self._guard_plugin_files()
         guard_api_url = settings.enrollment_public_api_url or settings.internal_api_base_url
         runtime_provider = normalize_runtime_provider(agent.provider)
         device_token = create_device_token(agent.id, device.id, device.token_version)
-        llm_proxy_enabled = bool(getattr(settings, "enrollment_llm_proxy", True))
         public_base = guard_api_url.rstrip("/")
         if public_base.endswith("/api/internal"):
             public_base = public_base[: -len("/api/internal")]
@@ -233,6 +238,7 @@ class EnrollmentService:
                     "base_url": proxy_base,
                     "key_env": "OPENAI_API_KEY",
                     "default_model": agent.model,
+                    "models": proxy_models,
                 }
             elif api_key or agent.base_url:
                 model_provider = "hermeshq-openai-compatible"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -248,18 +249,52 @@ def _llm_rate_ok(device_id: str) -> bool:
     return True
 
 
-async def _resolve_llm_target(db: AsyncSession, agent) -> tuple[str, str]:
+async def _llm_proxy_vault():
+    from hermeshq.config import get_settings
+    from hermeshq.services.secret_vault import build_vault_from_settings
+
+    return build_vault_from_settings(get_settings())
+
+
+async def _llm_keyed_providers(db: AsyncSession) -> list:
+    from sqlalchemy import select
+
+    from hermeshq.models.provider import ProviderDefinition
+
+    result = await db.execute(
+        select(ProviderDefinition)
+        .where(ProviderDefinition.enabled.is_(True))
+        .order_by(ProviderDefinition.sort_order.asc(), ProviderDefinition.name.asc())
+    )
+    return [d for d in result.scalars().all() if d.api_key_ref and (d.base_url or "").strip()]
+
+
+async def _llm_model_catalog(db: AsyncSession, agent) -> list[str]:
+    ids: list[str] = []
+    if agent.model:
+        ids.append(agent.model)
+    for definition in await _llm_keyed_providers(db):
+        for model in definition.available_models or []:
+            if model and model not in ids:
+                ids.append(model)
+    return ids
+
+
+async def _resolve_llm_target(db: AsyncSession, agent, model: str | None = None) -> tuple[str, str]:
     from hermeshq.models.provider import ProviderDefinition
     from hermeshq.services.credentials import resolve_secret_value
 
-    api_key = None
-    settings = None
-    if agent.api_key_ref:
-        from hermeshq.config import get_settings
-        from hermeshq.services.secret_vault import build_vault_from_settings
+    if model and model != agent.model:
+        vault = await _llm_proxy_vault()
+        for definition in await _llm_keyed_providers(db):
+            if model in (definition.available_models or []):
+                key = await resolve_secret_value(db, vault, definition.api_key_ref)
+                if key:
+                    return key, definition.base_url.strip().rstrip("/")
 
-        settings = get_settings()
-        api_key = await resolve_secret_value(db, build_vault_from_settings(settings), agent.api_key_ref)
+    api_key = None
+    if agent.api_key_ref:
+        api_key = await resolve_secret_value(db, await _llm_proxy_vault(), agent.api_key_ref)
     base_url = (agent.base_url or "").strip()
     if not base_url and agent.provider:
         definition = await db.get(ProviderDefinition, agent.provider)
@@ -268,6 +303,20 @@ async def _resolve_llm_target(db: AsyncSession, agent) -> tuple[str, str]:
     if not base_url:
         base_url = "https://api.openai.com/v1"
     return api_key or "", base_url.rstrip("/")
+
+
+@router.get("/llm/v1/models")
+async def llm_proxy_models(
+    device: EnrolledDevice = Depends(_resolve_device_from_token),
+    db: AsyncSession = Depends(get_db_session),
+):
+    from hermeshq.models.agent import Agent
+
+    agent = await db.get(Agent, device.agent_id)
+    if not agent or agent.is_archived:
+        raise HTTPException(status_code=403, detail="Agent is not available")
+    ids = await _llm_model_catalog(db, agent)
+    return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "hermeshq-proxy"} for m in ids]}
 
 
 @router.post("/llm/v1/chat/completions")
@@ -285,8 +334,12 @@ async def llm_proxy_chat(
     agent = await db.get(Agent, device.agent_id)
     if not agent or agent.is_archived:
         raise HTTPException(status_code=403, detail="Agent is not available")
-    api_key, base_url = await _resolve_llm_target(db, agent)
     body = await request.body()
+    try:
+        requested_model = json.loads(body).get("model")
+    except (ValueError, UnicodeDecodeError):
+        requested_model = None
+    api_key, base_url = await _resolve_llm_target(db, agent, requested_model)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

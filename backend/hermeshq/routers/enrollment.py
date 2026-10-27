@@ -249,88 +249,14 @@ def _llm_rate_ok(device_id: str) -> bool:
     return True
 
 
-async def _llm_proxy_vault():
-    from hermeshq.config import get_settings
-    from hermeshq.services.secret_vault import build_vault_from_settings
-
-    return build_vault_from_settings(get_settings())
-
-
-async def _llm_keyed_providers(db: AsyncSession) -> list:
-    from sqlalchemy import select
-
-    from hermeshq.models.provider import ProviderDefinition
-
-    result = await db.execute(
-        select(ProviderDefinition)
-        .where(ProviderDefinition.enabled.is_(True))
-        .order_by(ProviderDefinition.sort_order.asc(), ProviderDefinition.name.asc())
-    )
-    return [d for d in result.scalars().all() if d.api_key_ref and (d.base_url or "").strip()]
-
-
-_PROVIDER_OK_TTL = 900.0
-_PROVIDER_OK_CACHE: dict[str, tuple[float, bool]] = {}
-
-
-async def _probe_provider_key(base_url: str, api_key: str, model: str) -> bool:
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=20, write=5, pool=5)) as client:
-            response = await client.post(
-                f"{base_url.rstrip('/')}/chat/completions",
-                json={"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            )
-        return response.status_code < 400
-    except httpx.HTTPError:
-        return False
-
-
-async def _llm_provider_operational(db: AsyncSession, definition, vault) -> bool:
-    import time as _time
-
-    from hermeshq.services.credentials import resolve_secret_value
-
-    cache_key = f"{definition.slug}:{definition.api_key_ref}"
-    now = _time.monotonic()
-    cached = _PROVIDER_OK_CACHE.get(cache_key)
-    if cached and now - cached[0] < _PROVIDER_OK_TTL:
-        return cached[1]
-    key = await resolve_secret_value(db, vault, definition.api_key_ref)
-    model = definition.default_model or next(iter(definition.available_models or []), "")
-    ok = bool(key and model) and await _probe_provider_key(definition.base_url, key, model)
-    _PROVIDER_OK_CACHE[cache_key] = (now, ok)
-    return ok
-
-
-async def _llm_model_catalog(db: AsyncSession, agent) -> list[str]:
-    import asyncio
-
-    ids: list[str] = []
-    if agent.model:
-        ids.append(agent.model)
-    providers = await _llm_keyed_providers(db)
-    if providers:
-        vault = await _llm_proxy_vault()
-        results = await asyncio.gather(*(_llm_provider_operational(db, d, vault) for d in providers))
-        for definition, ok in zip(providers, results):
-            if not ok:
-                continue
-            for model in definition.available_models or []:
-                if model and model not in ids:
-                    ids.append(model)
-    return ids
-
-
 async def _resolve_llm_target(db: AsyncSession, agent, model: str | None = None) -> tuple[str, str]:
     from hermeshq.models.provider import ProviderDefinition
     from hermeshq.services.credentials import resolve_secret_value
+    from hermeshq.services.llm_catalog import build_proxy_vault, keyed_providers
 
     if model and model != agent.model:
-        vault = await _llm_proxy_vault()
-        for definition in await _llm_keyed_providers(db):
+        vault = await build_proxy_vault()
+        for definition in await keyed_providers(db):
             if model in (definition.available_models or []):
                 key = await resolve_secret_value(db, vault, definition.api_key_ref)
                 if key:
@@ -338,7 +264,7 @@ async def _resolve_llm_target(db: AsyncSession, agent, model: str | None = None)
 
     api_key = None
     if agent.api_key_ref:
-        api_key = await resolve_secret_value(db, await _llm_proxy_vault(), agent.api_key_ref)
+        api_key = await resolve_secret_value(db, await build_proxy_vault(), agent.api_key_ref)
     base_url = (agent.base_url or "").strip()
     if not base_url and agent.provider:
         definition = await db.get(ProviderDefinition, agent.provider)
@@ -355,11 +281,12 @@ async def llm_proxy_models(
     db: AsyncSession = Depends(get_db_session),
 ):
     from hermeshq.models.agent import Agent
+    from hermeshq.services.llm_catalog import model_catalog
 
     agent = await db.get(Agent, device.agent_id)
     if not agent or agent.is_archived:
         raise HTTPException(status_code=403, detail="Agent is not available")
-    ids = await _llm_model_catalog(db, agent)
+    ids = await model_catalog(db, agent)
     return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "hermeshq-proxy"} for m in ids]}
 
 

@@ -81,6 +81,7 @@ class TestLlmModelRouting:
     async def test_model_catalog_agent_default_first(self) -> None:
         from types import SimpleNamespace
 
+        import hermeshq.routers.enrollment as enrollment_router
         from hermeshq.routers.enrollment import _llm_model_catalog
 
         zai = SimpleNamespace(
@@ -91,20 +92,34 @@ class TestLlmModelRouting:
             sort_order=20,
             name="Z.AI Coding Plan",
         )
-        no_key = SimpleNamespace(
+        dead = SimpleNamespace(
             enabled=True,
-            api_key_ref=None,
+            api_key_ref="invalid_openrouter_key",
             base_url="https://openrouter.ai/api/v1",
             available_models=["anthropic/claude-sonnet-4"],
             sort_order=30,
             name="OpenRouter API",
         )
         agent = SimpleNamespace(model="qwen3.8-27b")
-        ids = await _llm_model_catalog(self._make_db([zai, no_key]), agent)
+
+        async def fake_vault():
+            return "vault"
+
+        async def fake_ok(session, definition, vault, **kwargs):
+            return definition.api_key_ref != "invalid_openrouter_key"
+
+        original_vault, original_ok = enrollment_router._llm_proxy_vault, enrollment_router._llm_provider_operational
+        enrollment_router._llm_proxy_vault = fake_vault
+        enrollment_router._llm_provider_operational = fake_ok
+        try:
+            ids = await _llm_model_catalog(self._make_db([zai, dead]), agent)
+        finally:
+            enrollment_router._llm_proxy_vault = original_vault
+            enrollment_router._llm_provider_operational = original_ok
         assert ids[0] == "qwen3.8-27b"
         assert "glm-5.3-flash" in ids
         assert "glm-5-turbo" in ids
-        assert all("claude" not in m for m in ids), "providers without key must not be exposed"
+        assert all("claude" not in m for m in ids), "providers with dead keys must not be exposed"
 
 
 class TestBundleLlmProxy:
